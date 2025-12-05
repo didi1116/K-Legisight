@@ -1,0 +1,454 @@
+
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
+from contextlib import asynccontextmanager
+import schemas 
+from database import supabase 
+import random 
+from fastapi import FastAPI, Depends, HTTPException, status, Query
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🚀 Server đang khởi động...")
+    print("✅ Đã kết nối Supabase!")
+    yield
+    print("🔥 Server đã tắt.")
+
+app = FastAPI(lifespan=lifespan)
+
+# --- CẤU HÌNH CORS ---
+origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# --- AUTH HELPER ---
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        user = supabase.auth.get_user(token)
+        if not user:
+             raise HTTPException(status_code=401, detail="Token không hợp lệ")
+        return user.user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    
+def get_committee_maps():
+    # committees 테이블에서 id / name 다 가져오기
+    res = supabase.table("committees").select("*").execute()
+    rows = res.data or []
+
+    print("DEBUG committees rows sample:", rows[:5])
+
+    name_to_id = {}
+    id_to_name = {}
+
+    for row in rows:
+        # 컬럼 이름이 committee_id 인지 id 인지 둘 다 체크
+        c_id = row.get("committee_id") or row.get("id")
+        name = row.get("name")
+
+        if c_id is None or not name:
+            continue
+
+        try:
+            c_id_int = int(c_id)
+        except Exception:
+            print("DEBUG invalid committee_id from committees:", c_id)
+            continue
+
+        id_to_name[c_id_int] = name
+        name_to_id[name] = c_id_int
+
+    print("DEBUG id_to_name_map sample:", list(id_to_name.items())[:5])
+    return name_to_id, id_to_name
+
+
+
+# ==========================================
+# 1. API DỮ LIỆU NGHỊ SĨ (SỬA LẠI TÊN BẢNG)
+# ==========================================
+
+# --- Lấy danh sách tất cả nghị sĩ ---
+@app.get("/api/legislators")
+def get_all_legislators():
+    try:
+        _, id_to_name_map = get_committee_maps()
+        response = supabase.table('dimension').select("*").execute()
+        data = response.data or []
+
+        results = []
+        for item in data:
+            # 🔹 primary key dùng lại cho cả id & member_id
+            member_pk = item.get("member_id") or item.get("id")
+
+            score = item.get("score") or random.randint(60, 99)
+
+            c_id_raw = item.get("committee_id")
+            try:
+                c_id = int(c_id_raw) if c_id_raw is not None else None
+            except Exception:
+                c_id = None
+
+            committee_name = id_to_name_map.get(c_id) or "소속 위원회 없음"
+
+            results.append({
+                "id": member_pk,          
+                "member_id": member_pk,  
+                "name": item.get("name"),
+                "party": item.get("party"),
+                "region": item.get("district") or item.get("region") or "비례대표",
+                "committee": committee_name,
+                "gender": item.get("gender", "-"),
+                "count": item.get("elected_time") or item.get("elected_count") or "초선",
+                "method": item.get("elected_type") or item.get("election_method") or "지역구",
+                "score": score
+            })
+
+        return results
+
+    except Exception as e:
+        print("Lỗi lấy danh sách:", e)
+        return []
+
+
+
+# --- Lấy dữ liệu cho Bộ lọc ---
+@app.get("/api/filters")
+def get_filters():
+    try:
+        # 1. Lấy danh sách Tên Ủy ban trực tiếp từ bảng 'committees'
+        com_res = supabase.table('committees').select("name").execute()
+        committee_names = sorted([c['name'] for c in com_res.data if c.get('name')])
+
+        # 2. Lấy các thông tin khác từ bảng 'dimension'
+        # Dùng select("*") cho an toàn, tránh lỗi nếu sai tên cột (ví dụ 'district' vs 'region')
+        response = supabase.table('dimension').select("*").execute()
+        data = response.data
+        
+        # Helper để lấy giá trị duy nhất và loại bỏ None
+        def get_unique_values(key_alternatives):
+            values = set()
+            for x in data:
+                val = None
+                for key in key_alternatives:
+                    if x.get(key):
+                        val = x.get(key)
+                        break
+                if val:
+                    values.add(val)
+            return sorted(list(values))
+
+        return {
+            "parties": get_unique_values(['party']),
+            "committees": committee_names, # Danh sách tên ủy ban đầy đủ lấy từ bảng committees
+            "genders": get_unique_values(['gender']),
+            "regions": get_unique_values(['district', 'region']), # Thử cả 2 tên cột
+            "counts": ["초선", "재선", "3선", "4선", "5선", "6선"], 
+            "methods": ["지역구", "비례대표"],
+        }
+    except Exception as e:
+        print("Lỗi Filter:", e)
+        # Trả về mảng rỗng để FE không bị crash
+        return {
+            "parties": [], "committees": [], "genders": [], 
+            "regions": [], "counts": [], "methods": []
+        }
+# ==========================================
+# 2. SEARCH API (ĐÃ SỬA LOGIC LOOKUP)
+# ==========================================
+
+@app.post("/api/search", response_model=schemas.SearchResponse)
+def search_analysis(data: schemas.SearchInput):
+    try:
+        name_to_id_map, id_to_name_map = get_committee_maps()
+        query = supabase.table('dimension').select("*")
+
+        if data.query:
+            query = query.ilike('name', f"%{data.query}%")
+        
+        if getattr(data, 'party', None) and data.party not in ["all", "소속정당 전체", "전체"]:
+            query = query.eq('party', data.party)
+
+        if getattr(data, 'committee', None) and data.committee not in ["all", "전체"]:
+            target_c_id = name_to_id_map.get(data.committee)
+            if target_c_id:
+                query = query.eq('committee_id', target_c_id)
+            else:
+                return {"profile": None, "results": [], "ai_summary": "Không tìm thấy ủy ban này."}
+
+        if getattr(data, 'city', None) and data.city not in ["all", "전체"]:
+            query = query.ilike('district', f"%{data.city}%") 
+
+        if getattr(data, 'gender', None) and data.gender not in ["all", "전체"]:
+            query = query.eq('gender', data.gender)
+
+        # 🔥 SỬA Ở ĐÂY
+        if getattr(data, 'count', None) and data.count not in ["all", "전체"]:
+            query = query.eq("elected_time", data.count)
+
+        if getattr(data, 'method', None) and data.method not in ["all", "전체"]:
+            query = query.eq('elected_type', data.method)
+        
+        response = query.execute()
+        found = response.data
+        
+        if not found: 
+            return {"profile": None, "results": [], "ai_summary": "Không tìm thấy kết quả phù hợp."}
+        
+        target = found[0]
+
+        member_pk = target.get("member_id") or target.get("id")
+
+        c_id_result = target.get('committee_id')
+        committee_display_name = id_to_name_map.get(c_id_result, "소속 위원회 없음")
+
+        profile_data = {
+            "id": member_pk,       
+            "member_id": member_pk,  
+            "type": "person",
+            "name": target.get('name'),
+            "party": target.get('party'),
+            "committee": committee_display_name,
+            "region": target.get('district') or target.get('region'),
+            "gender": target.get('gender'),
+            "count": target.get('elected_time'),
+            "method": target.get('elected_type'),
+            "total_bills": 142,
+            "img": target.get('img') or target.get('image_url') or ""
+        }
+
+
+        fake_bills = [
+            {
+                "id": 1, 
+                "billNumber": "2214531", 
+                "billName": "AI 산업 육성법 (Ví dụ)", 
+                "date": "2024-05-30", 
+                "sentiment": "협력", 
+                "score": 95, 
+                "role": "대표발의", 
+                "proposer": f"{target['name']} 외 10인"
+            },
+        ]
+
+        return {
+            "profile": profile_data,
+            "results": fake_bills,
+            "ai_summary": f"DB 분석 결과: {target['name']} 의원은 {committee_display_name}에서 활발한 활동 중입니다."
+        }
+
+    except Exception as e:
+        print("Lỗi Search:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# 🔥 Dùng member_id để lấy 법안/통계
+@app.get("/api/legislators/{member_id}/bills")
+def get_legislator_bills(member_id: int):
+    try:
+        print("DEBUG /bills member_id =", member_id)
+
+        # 1️⃣ member_bill_stats 에서 member_id 로 조회
+        stats_res = (
+            supabase.table("member_bill_stats")
+            .select("*")
+            .eq("member_id", member_id)   
+            .execute()
+        )
+
+        rows = stats_res.data or []
+        print("DEBUG rows count =", len(rows))
+
+        bills = []
+        for idx, row in enumerate(rows, start=1):
+            review_text = row.get("bill_review", "")
+            member_name = row.get("member_name", "")
+
+            # 발언 관련 통계
+            n_speeches = row.get("n_speeches_bill") or row.get("n_speech_bill") or 0
+            total_len = row.get("total_speech_length_bill") or 0
+
+            # 태도 / 점수
+            stance = row.get("stance") or "중립"
+            raw_prob = row.get("score_prob_mean")
+
+            if raw_prob is not None:
+                try:
+                    p = float(raw_prob)          # -1 ~ 1 이라고 가정
+                    score = max(0, min(100, round((p + 1) / 2 * 100)))
+                except Exception:
+                    score = 50
+            else:
+                score = 50
+
+            # 제안일자 (bills 테이블이나 stats 에 있으면 가져오기)
+            proposal_date = (
+                row.get("제안일자")
+                or row.get("proposal_date")
+                or None
+            )
+
+            bill_number = (
+                row.get("의안번호")
+            )
+
+            meeting_id = row.get("meeting_id")
+
+            bills.append({
+                "id": idx,
+                "billNumber": bill_number,
+                "billName": review_text,
+                "proposer": member_name,
+                "role": "심사 참여",
+                "nSpeeches": n_speeches,
+                "totalSpeechLength": total_len,
+                "sentiment": stance,
+                "score": score,
+                "scoreProbMean": raw_prob,
+                "date": proposal_date,
+                "meetingId": meeting_id,
+            })
+
+        # 간단 요약
+        total_bills = len(bills)
+        total_speeches = sum(b["nSpeeches"] for b in bills)
+        total_length = sum(b["totalSpeechLength"] for b in bills)
+
+        if total_bills > 0:
+            avg_speeches = round(total_speeches / total_bills, 1)
+            avg_length = round(total_length / total_bills, 1)
+            ai_summary = (
+                f"해당 의원은 총 {total_bills}건의 법안 심사에 참여했습니다. "
+                f"법안 1건당 평균 발언 횟수는 {avg_speeches}회, "
+                f"평균 발언 분량은 {avg_length}문장 수준입니다."
+            )
+        else:
+            ai_summary = "이 의원의 법안 심사 데이터가 없습니다."
+
+        return {"bills": bills, "ai_summary": ai_summary}
+
+    except Exception as e:
+        print("Error get_legislator_bills:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/api/speeches")
+def get_speeches(
+    member_id: int = Query(..., description="member_id của nghị sĩ"),
+    meeting_id: int | None = Query(None, description="meeting_id của 회의"),
+    bill_name: str | None = Query(None, description="bills text để khớp đúng 법안"),
+):
+    """
+    실제 발언 리스트를 Supabase의 public.speeches 테이블에서 가져오는 API
+    """
+    try:
+        print("DEBUG /api/speeches member_id =", member_id, "meeting_id =", meeting_id)
+        print("DEBUG /api/speeches bill_name =", (bill_name or "")[:80])
+
+        # 👈 tên bảng đúng: public.speeches
+        query = (
+            supabase
+            .table("speeches")
+            .select("*")
+            .eq("member_id", member_id)
+        )
+
+        if meeting_id is not None:
+            query = query.eq("meeting_id", meeting_id)
+
+        if bill_name:
+            try:
+                head = bill_name.strip().split("\n")[0][:40]
+                query = query.ilike("bills", f"%{head}%")
+            except Exception as e:
+                print("DEBUG skip bill_name filter:", repr(e))
+
+        res = query.order("speech_id", desc=False).execute()
+        rows = res.data or []
+        print("DEBUG speeches count =", len(rows))
+
+        speeches = []
+        for idx, row in enumerate(rows, start=1):
+            speeches.append({
+                "id": row.get("speech_id") or idx,
+                "text": row.get("speech_text") or row.get("speech") or "",
+                "bills": row.get("bills"),
+                "meetingId": row.get("meeting_id"),
+                "memberId": row.get("member_id"),
+                "sentiment": "중립",   # tạm thời mock
+                "score": 50,          # tạm thời mock
+            })
+
+        return {"speeches": speeches}
+
+    except Exception as e:
+        print("Error /api/speeches:", repr(e))
+        raise HTTPException(status_code=500, detail=f"/api/speeches failed: {e}")
+
+
+
+# ==========================================
+# 2. AUTHENTICATION & AI (GIỮ NGUYÊN)
+# ==========================================
+
+@app.post("/register", response_model=schemas.UserOut)
+def register_user(user: schemas.UserCreate):
+    try:
+        response = supabase.auth.sign_up({
+            "email": user.email,
+            "password": user.password,
+            "options": {"data": {"username": user.username, "full_name": user.full_name}}
+        })
+        if not response.user:
+             raise HTTPException(status_code=400, detail="실패")
+        return {
+             "email": response.user.email,
+             "username": response.user.user_metadata.get("username"),
+             "full_name": response.user.user_metadata.get("full_name")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/token")
+def login_for_access_token(user_data: schemas.UserLogin):
+    try:
+        response = supabase.auth.sign_in_with_password({
+            "email": user_data.email, "password": user_data.password
+        })
+        return {
+            "access_token": response.session.access_token, "token_type": "bearer",
+            "user": {"email": response.user.email, "username": response.user.user_metadata.get("username")}
+        }
+    except Exception:
+        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu sai.")
+
+# ... (Các API AI khác giữ nguyên) ...
+
+@app.post("/sentiment", response_model=schemas.SentimentOutput)
+def analyze_sentiment(data_in: schemas.AnalysisInput, current_user = Depends(get_current_user)):
+    return {"label": "협력", "confidence_score": 0.95}
+
+@app.post("/prediction", response_model=schemas.PredictionOutput)
+def predict_legislation(data_in: schemas.AnalysisInput, current_user = Depends(get_current_user)):
+    return {"label": "가결 ", "probability": 0.88}
+
+@app.get("/api/dashboard-stats")
+def get_dashboard_stats():
+    return {
+        "sentiment": {"cooperative": 65, "non_cooperative": 35, "neutral": 0},
+        "prediction": {"bill_name": "AI 기본법 (안)", "probability": 87, "status": "예측 완료"}
+    }
+
+@app.get("/")
+def read_root():
+    return {"message": "K-LegiSight API is running!"}
