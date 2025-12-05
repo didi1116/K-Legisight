@@ -2,6 +2,7 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from contextlib import asynccontextmanager
+from typing import List
 import schemas 
 from database import supabase 
 import random 
@@ -394,6 +395,28 @@ def get_speeches(
     except Exception as e:
         print("Error /api/speeches:", repr(e))
         raise HTTPException(status_code=500, detail=f"/api/speeches failed: {e}")
+
+# [수정] 특정 의원 발언 데이터 조회용 API (구조 개선: 데이터 가공 + AI 요약)
+@app.get("/api/speeches/member/{member_id}")
+def get_speeches_by_member(member_id: int):
+    try:
+        print(f"DEBUG /api/speeches/member/{member_id}")
+
+        # 1. DB 쿼리
+        response = (
+            supabase.table("speeches")
+            .select("*")
+            .eq("member_id", member_id)
+            .execute()
+        )
+        rows = response.data or []
+        
+        # 4. 결과 반환
+        return {"speeches": rows}
+
+    except Exception as e:
+        print(f"Error fetching speeches for member {member_id}:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
