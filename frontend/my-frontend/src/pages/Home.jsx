@@ -119,7 +119,7 @@ export function Home() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
           
           {/* Model 1: Sentiment Analysis -> Bấm vào nhảy sang trang Analysis */}
-          <Link to="/sentiment" className="block group">
+          <Link to="/sentimentpage" className="block group">
             <Card className="h-full shadow-xl border-0 hover:-translate-y-1 transition-transform duration-300 bg-white/95 backdrop-blur cursor-pointer group-hover:ring-2 group-hover:ring-blue-500/50">
               <CardHeader className="pb-2">
                 <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mb-4 group-hover:bg-blue-600 transition-colors">

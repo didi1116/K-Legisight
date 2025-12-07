@@ -10,6 +10,8 @@ import { LegislatorBillDetail } from './pages/LegislatorBillDetail';
 import { BillPrediction } from './pages/BillPrediction.jsx'
 import { PartyBillMembers } from './pages/PartyBillMembers.jsx'
 import { LegislatorDashboard } from './pages/LegislatorDashboard.jsx';
+import SentimentPage from './pages/SentimentPage.jsx';
+
 
 import './index.css'
 
@@ -34,6 +36,9 @@ function App() {
         <Route path="/login" element={<LoginForm />} />
         <Route path="/register" element={<SignupForm />} />
         <Route path="/home" element={<Home />} />
+        <Route path="/sentimentpage" element = {<SentimentPage/>} />
+
+
         <Route path="/sentiment" element={<LegislatorAnalysis />} />                  // Trang phân tích nghị sĩ
         <Route path="/analysis/person-view" element={<LegislatorDashboard />} />      // Trang hồ sơ cá nhân nghị sĩ         
         <Route path ="//analysis/detail" element={<LegislatorBillDetail />} />        // Trang chi tiết dự luật của nghị sĩ

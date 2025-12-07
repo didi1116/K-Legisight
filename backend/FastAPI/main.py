@@ -7,6 +7,8 @@ import schemas
 from database import supabase 
 import random 
 from fastapi import FastAPI, Depends, HTTPException, status, Query
+import pandas as pd
+from build_member_stats import build_member_stats
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -397,12 +399,12 @@ def get_speeches(
         raise HTTPException(status_code=500, detail=f"/api/speeches failed: {e}")
 
 # [수정] 특정 의원 발언 데이터 조회용 API (구조 개선: 데이터 가공 + AI 요약)
-@app.get("/api/speeches/member/{member_id}")
+@app.get("/api/build_stat/{member_id}")
 def get_speeches_by_member(member_id: int):
     try:
-        print(f"DEBUG /api/speeches/member/{member_id}")
+        print(f"DEBUG /api/build_stat/{member_id}")
 
-        # 1. DB 쿼리
+        # 1. DB에서 해당 member_id의 speeches 조회
         response = (
             supabase.table("speeches")
             .select("*")
@@ -410,14 +412,39 @@ def get_speeches_by_member(member_id: int):
             .execute()
         )
         rows = response.data or []
-        
+        print(f"DEBUG speeches rows count = {len(rows)}")
+
+        # speeches 가 하나도 없으면 빈 결과
+        if not rows:
+            return {
+                "member_id": member_id,
+                "stats": None,
+                "speeches": [],
+                "message": "해당 의원의 발언 데이터가 없습니다.",
+            }
+
+        # 2. pandas DataFrame 으로 변환
+        df = pd.DataFrame(rows)
+
+        # 3. build_member_stats 호출 (현재 DataFrame 기준으로 의원별 통계 계산)
+        stats_df = build_member_stats(df)
+
+        if stats_df.empty:
+            stats_dict = None
+        else:
+            # 이 API는 한 명의 member_id만 조회하므로 첫 행만 사용
+            stats_dict = stats_df.iloc[0].to_dict()
+
         # 4. 결과 반환
-        return {"speeches": rows}
+        return {
+            "member_id": member_id,
+            "stats": stats_dict,
+            "speeches": rows,  # 필요 없으면 제거해도 됨
+        }
 
     except Exception as e:
         print(f"Error fetching speeches for member {member_id}:", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 # ==========================================
