@@ -3,7 +3,6 @@ import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Download, Bot } from "lucide-react";
-
 import { LegislatorProfile } from '@/components/legislator/LegislatorProfile';
 import { LegislatorBillTable } from '@/components/legislator/LegislatorBillTable';
 import { LegislatorFilter } from '@/components/legislator/LegislatorFilter';
@@ -16,6 +15,8 @@ export function LegislatorDashboard() {
   const { memberProfile } = location.state || {};
 
   // ---------------- STATE ----------------
+  const [fullProfile, setFullProfile] = useState(memberProfile || null); 
+  
   const [originalBills, setOriginalBills] = useState([]);
   const [bills, setBills] = useState([]);
   const [aiSummary, setAiSummary] = useState("");
@@ -27,44 +28,41 @@ export function LegislatorDashboard() {
   const currentDistricts = DISTRICTS[selectedCity] || [];
 
   // ------------- 1. LOAD BILL DATA -------------
-  useEffect(() => {
+useEffect(() => {
     if (!memberProfile) return;
 
-    const fetchBills = async () => {
+    const memberId = memberProfile.member_id ?? memberProfile.id;
+    if (!memberId) return;
+
+    const fetchData = async () => {
       try {
-        console.log("DEBUG memberProfile:", memberProfile);
-
-        // ưu tiên member_id, fallback sang id
-        const memberId = memberProfile.member_id ?? memberProfile.id;
-        console.log("DEBUG memberId for bills:", memberId);
-
-        if (!memberId) {
-          console.error("No member_id / id in memberProfile");
-          return;
+        // A. Gọi API lấy thông tin chi tiết nghị sĩ (để lấy cái list committees)
+        // Giả sử bạn có endpoint này, hoặc bạn phải bảo Backend viết thêm
+        const profileRes = await fetch(`http://localhost:8000/api/legislators/${memberId}`);
+        if (profileRes.ok) {
+          const profileData = await profileRes.json();
+          // Merge dữ liệu cũ với dữ liệu mới fetch được (chứa committees)
+          setFullProfile(prev => ({ ...prev, ...profileData, type: 'person' }));
         }
 
-        const res = await fetch(
-          `http://localhost:8000/api/legislators/${memberId}/bills`
-        );
-
-        if (!res.ok) {
-          const text = await res.text();
-          console.error("Bills API error:", res.status, text);
-          return;
+        // B. Gọi API lấy danh sách bill (như cũ)
+        const billsRes = await fetch(`http://localhost:8000/api/legislators/${memberId}/bills`);
+        if (billsRes.ok) {
+          const billsData = await billsRes.json();
+          setOriginalBills(billsData.bills || []);
+          setBills(billsData.bills || []);
+          setAiSummary(billsData.ai_summary || "");
+          
+          // Cập nhật số lượng bill vào profile luôn
+          setFullProfile(prev => ({ ...prev, total_bills: billsData.bills?.length || 0 }));
         }
 
-        const data = await res.json();
-        console.log("DEBUG bills data:", data);
-
-        setOriginalBills(data.bills || []);
-        setBills(data.bills || []);
-        setAiSummary(data.ai_summary || "");
       } catch (err) {
-        console.error("Failed to load bills:", err);
+        console.error("Failed to load data:", err);
       }
     };
 
-    fetchBills();
+    fetchData();
   }, [memberProfile]);
 
   // ------------- 2. FILTER / SEARCH -------------
@@ -88,7 +86,7 @@ export function LegislatorDashboard() {
   };
 
   // ------------- 3. GUARD NẾU KHÔNG CÓ PROFILE -------------
-  if (!memberProfile) {
+  if (!fullProfile) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
         <p className="text-slate-500 mb-4">의원 정보를 찾을 수 없습니다.</p>
@@ -151,7 +149,7 @@ export function LegislatorDashboard() {
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           
           {/* Profile + Bill table */}
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 sticky">
             <LegislatorProfile
               profile={{ ...memberProfile, type: 'person', total_bills: bills.length }}
             />

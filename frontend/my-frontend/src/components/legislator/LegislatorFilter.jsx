@@ -172,7 +172,7 @@ export function LegislatorFilter({
           </FilterItem>
 
           <FilterItem label="당선횟수">
-            <Select onValueChange={(value) => setSelectedMethod(value)}>
+            <Select onValueChange={(value) => setSelectedCount(value)}>
               <SelectTrigger><SelectValue placeholder="전체" /></SelectTrigger>
               <SelectContent>
                     <SelectItem value="all">전체</SelectItem>
@@ -200,21 +200,6 @@ export function LegislatorFilter({
               </SelectContent>
             </Select>
           </FilterItem>
-
-          {/* Ô NHẬP DỰ LUẬT */}
-          <div className="col-span-1 md:col-span-2 lg:col-span-3 bg-blue-50 p-4 rounded-lg border border-blue-100 mb-2">
-            <div className="flex items-center gap-4">
-              <label className="w-24 text-sm font-bold text-blue-900 shrink-0 flex items-center gap-2">
-                <FileText className="w-4 h-4" /> 대상 법안
-              </label>
-              <Input 
-                placeholder="분석하고 싶은 법안명을 입력하세요 (예: 인공지능 산업 육성법)" 
-                className="h-11 text-base bg-white border-blue-200 focus-visible:ring-blue-500"
-                value={billName}
-                onChange={(e) => setBillName(e.target.value)}
-              />
-            </div>
-          </div>
         </div>
 
         {/* Buttons */}

@@ -6,11 +6,9 @@ from typing import List
 import schemas 
 from database import supabase 
 import random 
-from fastapi import FastAPI, Depends, HTTPException, status, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Query, APIRouter
 import pandas as pd
 from build_member_stats import build_member_stats
-import ast
-from util_common import compute_score_prob, compute_speech_length
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,6 +18,7 @@ async def lifespan(app: FastAPI):
     print("🔥 Server đã tắt.")
 
 app = FastAPI(lifespan=lifespan)
+router = APIRouter()
 
 # --- CẤU HÌNH CORS ---
 origins = [
@@ -256,6 +255,51 @@ def search_analysis(data: schemas.SearchInput):
         print("Lỗi Search:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+
+# --- API: Lấy chi tiết Nghị sĩ + Lịch sử Ủy ban ---
+@router.get("/api/legislators/{member_id}")
+def get_legislator_detail(member_id: int, db: Session = Depends(get_db)):
+    
+    # 1. Lấy thông tin cơ bản (Bảng Member)
+    # Lưu ý: Sửa 'member' thành tên bảng chứa thông tin nghị sĩ của bạn (vd: members)
+    member_query = text("SELECT * FROM member WHERE member_id = :mid")
+    member = db.execute(member_query, {"mid": member_id}).mappings().first()
+    
+    if not member:
+        raise HTTPException(status_code=404, detail="Legislator not found")
+
+    # 2. Lấy lịch sử ủy ban từ bảng 'committees_history' 👈 ĐÃ SỬA TÊN BẢNG
+    # Dựa vào hình ảnh bạn gửi: có cột committee, start_date, end_date
+    committee_query = text("""
+        SELECT committee, start_date, end_date 
+        FROM committees_history 
+        WHERE member_id = :mid 
+        ORDER BY start_date DESC
+    """)
+    committees_rows = db.execute(committee_query, {"mid": member_id}).mappings().all()
+
+    # 3. Chuyển đổi kết quả sang List Dict
+    committees_list = []
+    for row in committees_rows:
+        committees_list.append({
+            "committee": row["committee"],
+            "start_date": row["start_date"],
+            "end_date": row["end_date"]
+        })
+
+    # 4. Trả về JSON gộp
+    return {
+        "id": member["member_id"],
+        "name": member["name"],
+        "party": member["party_name"], 
+        "region": member["region"],
+        "gender": member["gender"],
+        "count": member["elected_count"], 
+        "method": member["election_method"], 
+        "committees": committees_list  # ✅ Frontend sẽ nhận được cái này
+    }
 
 
 # 🔥 Dùng member_id để lấy 법안/통계

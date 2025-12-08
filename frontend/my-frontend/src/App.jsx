@@ -10,7 +10,7 @@ import { LegislatorBillDetail } from './pages/LegislatorBillDetail';
 import { BillPrediction } from './pages/BillPrediction.jsx'
 import { PartyBillMembers } from './pages/PartyBillMembers.jsx'
 import { LegislatorDashboard } from './pages/LegislatorDashboard.jsx';
-import SentimentPage from './pages/SentimentPage.jsx';
+import SentimentLanding from './pages/SentimentLanding.jsx'
 
 
 import './index.css'
@@ -36,14 +36,16 @@ function App() {
         <Route path="/login" element={<LoginForm />} />
         <Route path="/register" element={<SignupForm />} />
         <Route path="/home" element={<Home />} />
-        <Route path="/sentimentpage" element = {<SentimentPage/>} />
+        <Route path="/sentimentpage" element = {<SentimentLanding/>} />               //phân tích cảm xúc chính
+        <Route path="/sentiment/member" element={<LegislatorAnalysis />} />           //phân tích nghị sĩ
 
-
-        <Route path="/sentiment" element={<LegislatorAnalysis />} />                  // Trang phân tích nghị sĩ
         <Route path="/analysis/person-view" element={<LegislatorDashboard />} />      // Trang hồ sơ cá nhân nghị sĩ         
+        
         <Route path ="//analysis/detail" element={<LegislatorBillDetail />} />        // Trang chi tiết dự luật của nghị sĩ
         <Route path ="/billprediction" element={<BillPrediction />} />                // Trang dự đoán dự luật
-        <Route path ="/analysis/party-members" element={<PartyBillMembers />} />      // Trang thành viên dự luật của đảng
+        <Route path ="/analysis/party-members" element={<PartyBillMembers />} />  
+        
+                 {/* Placeholder */}
       </Routes>
       </div>
     {showFooter && <Footer />}
