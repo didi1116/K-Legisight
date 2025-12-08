@@ -203,6 +203,7 @@ def search_analysis(data: schemas.SearchInput):
         if getattr(data, 'method', None) and data.method not in ["all", "전체"]:
             query = query.eq('elected_type', data.method)
         
+
         response = query.execute()
         found = response.data
         
@@ -345,6 +346,7 @@ def get_legislator_bills(member_id: int):
     except Exception as e:
         print("Error get_legislator_bills:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
+ #수정 X
     
 
 @app.get("/api/speeches")
@@ -643,5 +645,83 @@ def get_member_bill_stats_api(member_id: int):
         print(f"Error calculating bill stats for member {member_id}:", e)
         raise HTTPException(status_code=500, detail=str(e))
     
+# [추가] 특정 의원의 상세 정보(기본정보 + 상임위/정당 이력) 조회 API
+@app.get("/api/legislators/{member_id}/detail")
+def get_legislator_detail(member_id: int):
+    try:
+        print(f"DEBUG /api/legislators/{member_id}/detail")
 
+        # 1. 기본 정보 조회 (dimension 테이블)
+        # ---------------------------------------------------------
+        # committee_id 매핑을 위해 맵 가져오기
+        _, id_to_name_map = get_committee_maps()
+
+        dim_res = (
+            supabase.table("dimension")
+            .select("*")
+            .eq("member_id", member_id)
+            .execute()
+        )
+        
+        if not dim_res.data:
+            raise HTTPException(status_code=404, detail="의원 정보를 찾을 수 없습니다.")
+        
+        member_info = dim_res.data[0]
+
+        # 현재 소속 위원회 이름 변환
+        current_c_id = member_info.get("committee_id")
+        current_committee_name = id_to_name_map.get(current_c_id) or "소속 위원회 없음"
+
+        # 2. 상임위 활동 이력 조회 (committees_history 테이블)
+        # ---------------------------------------------------------
+        # 최신순 정렬 (start_date 내림차순)
+        comm_hist_res = (
+            supabase.table("committees_history")
+            .select("*")
+            .eq("member_id", member_id)
+            .order("start_date", desc=True)
+            .execute()
+        )
+        committee_history = comm_hist_res.data or []
+
+        # 3. 정당 이력 조회 (parties_history 테이블)
+        # ---------------------------------------------------------
+        # 최신순 정렬
+        party_hist_res = (
+            supabase.table("parties_history")
+            .select("*")
+            .eq("member_id", member_id)
+            .order("start_date", desc=True)
+            .execute()
+        )
+        party_history = party_hist_res.data or []
+
+        # 4. 결과 조합 및 반환
+        # ---------------------------------------------------------
+        return {
+            "member_id": member_id,
+            "profile": {
+                "name": member_info.get("name"),
+                "party": member_info.get("party"),
+                "district": member_info.get("district"),
+                "gender": member_info.get("gender"),
+                "elected_count": member_info.get("elected_time") or member_info.get("elected_count"), # 당선 횟수
+                "elected_type": member_info.get("elected_type"), # 지역구/비례대표
+                "committee": current_committee_name, # 현재 소속 상임위
+                "birthdate": member_info.get("birthdate"),
+                "age": member_info.get("age"),
+                "image_url": member_info.get("img") or member_info.get("image_url") or "",
+            },
+            "history": {
+                "committees": committee_history,
+                "parties": party_history
+            },
+            "message": "성공적으로 조회되었습니다."
+        }
+
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as e:
+        print(f"Error fetching legislator detail for {member_id}:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
