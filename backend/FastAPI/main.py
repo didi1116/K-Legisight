@@ -9,6 +9,9 @@ import random
 from fastapi import FastAPI, Depends, HTTPException, status, Query, APIRouter
 import pandas as pd
 from build_member_stats import build_member_stats
+from sqlalchemy.orm import Session
+
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -213,6 +216,26 @@ def search_analysis(data: schemas.SearchInput):
 
         member_pk = target.get("member_id") or target.get("id")
 
+        history_res = (
+            supabase.table("committees_history")
+            .select("committee, start_date, end_date")
+            .eq("member_id", member_pk)
+            .order("start_date", desc=True) # Mới nhất lên đầu
+            .execute()
+        )
+        
+        # Format dữ liệu cho khớp với Frontend (name, startDate, endDate)
+        raw_history = history_res.data or []
+        formatted_committees = []
+        
+        for h in raw_history:
+            formatted_committees.append({
+                "name": h.get("committee"),
+                "startDate": h.get("start_date"),
+                "endDate": h.get("end_date")
+            })
+
+
         c_id_result = target.get('committee_id')
         committee_display_name = id_to_name_map.get(c_id_result, "소속 위원회 없음")
 
@@ -223,6 +246,7 @@ def search_analysis(data: schemas.SearchInput):
             "name": target.get('name'),
             "party": target.get('party'),
             "committee": committee_display_name,
+            "committees": formatted_committees,
             "region": target.get('district') or target.get('region'),
             "gender": target.get('gender'),
             "count": target.get('elected_time'),
@@ -258,9 +282,8 @@ def search_analysis(data: schemas.SearchInput):
 
 
 
-# --- API: Lấy chi tiết Nghị sĩ + Lịch sử Ủy ban ---
-@router.get("/api/legislators/{member_id}")
-def get_legislator_detail(member_id: int, db: Session = Depends(get_db)):
+
+
     
     # 1. Lấy thông tin cơ bản (Bảng Member)
     # Lưu ý: Sửa 'member' thành tên bảng chứa thông tin nghị sĩ của bạn (vd: members)
@@ -312,16 +335,47 @@ def get_legislator_bills(member_id: int):
         stats_res = (
             supabase.table("member_bill_stats")
             .select("*")
-            .eq("member_id", member_id)   
+            .eq("member_id", member_id)
             .execute()
         )
 
         rows = stats_res.data or []
         print("DEBUG rows count =", len(rows))
+        
+        # ---------------------------------------------------------
+        # [추가] 2️⃣ bills 테이블에서 bill_name 가져오기 (Look up)
+        # ---------------------------------------------------------
+        # row에 있는 'bill_id'를 사용하여 수집
+        bill_ids = [str(r.get("bill_id")) for r in rows if r.get("bill_id")]
+        
+        bill_name_map = {}
+        if bill_ids:
+            try:
+                # bills 테이블에서 id가 bill_ids에 포함되는 것들 조회
+                bill_res = (
+                    supabase.table("bills")
+                    .select("bill_id, bill_name")
+                    .in_("bill_id", bill_ids)
+                    .execute()
+                )
+                
+                # 매핑 생성: { "2100001": "법안이름...", ... }
+                for b_item in (bill_res.data or []):
+                    b_id = str(b_item.get("bill_id"))
+                    b_name = b_item.get("bill_name")
+                    bill_name_map[b_id] = b_name
+            except Exception as e:
+                print("Error fetching bill names in get_legislator_bills:", e)
+        # ---------------------------------------------------------
 
         bills = []
         for idx, row in enumerate(rows, start=1):
-            review_text = row.get("bill_review", "")
+            # bill_id를 사용
+            bill_id_val = str(row.get("bill_id", ""))
+            
+            # [수정] bill_name_map에서 실제 법안 이름을 찾음. 없으면 ID 그대로 사용하거나 대체 텍스트 사용
+            bill_name_real = bill_name_map.get(bill_id_val, bill_id_val)
+
             member_name = row.get("member_name", "")
 
             # 발언 관련 통계
@@ -333,6 +387,9 @@ def get_legislator_bills(member_id: int):
             raw_prob = row.get("score_prob_mean")
 
             if raw_prob is not None:
+                raw_prob = round(raw_prob, 3)
+
+            if raw_prob is not None:
                 try:
                     p = float(raw_prob)          # -1 ~ 1 이라고 가정
                     score = max(0, min(100, round((p + 1) / 2 * 100)))
@@ -341,23 +398,22 @@ def get_legislator_bills(member_id: int):
             else:
                 score = 50
 
-            # 제안일자 (bills 테이블이나 stats 에 있으면 가져오기)
+            # 제안일자
             proposal_date = (
                 row.get("제안일자")
                 or row.get("proposal_date")
                 or None
             )
 
-            bill_number = (
-                row.get("의안번호")
-            )
+            # 의안 번호 (bill_id)
+            bill_number = bill_id_val
 
             meeting_id = row.get("meeting_id")
 
             bills.append({
                 "id": idx,
                 "billNumber": bill_number,
-                "billName": review_text,
+                "billName": bill_name_real, # [수정됨] 실제 법안 이름 할당
                 "proposer": member_name,
                 "role": "심사 참여",
                 "nSpeeches": n_speeches,
@@ -390,8 +446,7 @@ def get_legislator_bills(member_id: int):
     except Exception as e:
         print("Error get_legislator_bills:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
- #수정 X
-    
+     
 
 @app.get("/api/speeches")
 def get_speeches(
@@ -689,6 +744,8 @@ def get_member_bill_stats_api(member_id: int):
         print(f"Error calculating bill stats for member {member_id}:", e)
         raise HTTPException(status_code=500, detail=str(e))
     
+
+
 # [추가] 특정 의원의 상세 정보(기본정보 + 상임위/정당 이력) 조회 API
 @app.get("/api/legislators/{member_id}/detail")
 def get_legislator_detail(member_id: int):

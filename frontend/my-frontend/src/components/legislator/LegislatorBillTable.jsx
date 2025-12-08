@@ -8,7 +8,7 @@ export function LegislatorBillTable({ bills, onBillClick, showProposer = true })
   // proposer 有/無 에 따라 grid column 개수 변경
   const gridClass = showProposer
     ? "grid-cols-[40px_1.4fr_1.2fr_4fr_1.4fr_1.4fr_0.9fr]"   // 7 cols
-    : "grid-cols-[40px_1.4fr_4.5fr_1.4fr_1.4fr_0.9fr]";      // 6 cols
+    : "grid-cols-[40px_1.4fr_4.5fr_1.4fr_1fr_0.9fr]";      // 6 cols
 
   return (
     <Card className="lg:col-span-3 shadow-sm border border-slate-200 flex flex-col h-[600px]">
@@ -35,7 +35,7 @@ export function LegislatorBillTable({ bills, onBillClick, showProposer = true })
         <div className="text-left">의안명</div>
         <div>제안일자</div>
         <div>AI 분석</div>
-        <div className="text-right pr-2">점수</div>
+        <div className="text-right pr-2">협력지수</div>
       </div>
 
       {/* BODY */}
@@ -115,8 +115,8 @@ export function LegislatorBillTable({ bills, onBillClick, showProposer = true })
 
                 {/* 점수 (0~100) */}
                 <div className="text-right pr-2 text-xs font-mono text-slate-700">
-                  {typeof bill.score === "number"
-                    ? `${bill.score}`
+                  {typeof bill.scoreProbMean === "number"
+                    ? `${bill.scoreProbMean}`
                     : "-"}
                 </div>
               </div>

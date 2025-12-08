@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Download, Bot } from "lucide-react";
+
 import { LegislatorProfile } from '@/components/legislator/LegislatorProfile';
 import { LegislatorBillTable } from '@/components/legislator/LegislatorBillTable';
 import { LegislatorFilter } from '@/components/legislator/LegislatorFilter';
@@ -14,9 +15,8 @@ export function LegislatorDashboard() {
   
   const { memberProfile } = location.state || {};
 
+  const [profileData, setProfileData] = useState(memberProfile || null);
   // ---------------- STATE ----------------
-  const [fullProfile, setFullProfile] = useState(memberProfile || null); 
-  
   const [originalBills, setOriginalBills] = useState([]);
   const [bills, setBills] = useState([]);
   const [aiSummary, setAiSummary] = useState("");
@@ -31,38 +31,63 @@ export function LegislatorDashboard() {
 useEffect(() => {
     if (!memberProfile) return;
 
+    // Ưu tiên member_id, fallback sang id
     const memberId = memberProfile.member_id ?? memberProfile.id;
-    if (!memberId) return;
+    
+    if (!memberId) {
+      console.error("No member_id / id in memberProfile");
+      return;
+    }
 
-    const fetchData = async () => {
+    // 1. Hàm lấy danh sách Bill (Giữ nguyên)
+    const fetchBills = async () => {
       try {
-        // A. Gọi API lấy thông tin chi tiết nghị sĩ (để lấy cái list committees)
-        // Giả sử bạn có endpoint này, hoặc bạn phải bảo Backend viết thêm
-        const profileRes = await fetch(`http://localhost:8000/api/legislators/${memberId}`);
-        if (profileRes.ok) {
-          const profileData = await profileRes.json();
-          // Merge dữ liệu cũ với dữ liệu mới fetch được (chứa committees)
-          setFullProfile(prev => ({ ...prev, ...profileData, type: 'person' }));
-        }
+        const res = await fetch(`http://localhost:8000/api/legislators/${memberId}/bills`);
+        if (!res.ok) throw new Error("Bills API error");
+        const data = await res.json();
 
-        // B. Gọi API lấy danh sách bill (như cũ)
-        const billsRes = await fetch(`http://localhost:8000/api/legislators/${memberId}/bills`);
-        if (billsRes.ok) {
-          const billsData = await billsRes.json();
-          setOriginalBills(billsData.bills || []);
-          setBills(billsData.bills || []);
-          setAiSummary(billsData.ai_summary || "");
-          
-          // Cập nhật số lượng bill vào profile luôn
-          setFullProfile(prev => ({ ...prev, total_bills: billsData.bills?.length || 0 }));
-        }
-
+        setOriginalBills(data.bills || []);
+        setBills(data.bills || []);
+        setAiSummary(data.ai_summary || "");
       } catch (err) {
-        console.error("Failed to load data:", err);
+        console.error("Failed to load bills:", err);
       }
     };
 
-    fetchData();
+    // 2. [MỚI] Hàm lấy chi tiết Profile + Lịch sử Ủy ban
+    const fetchDetail = async () => {
+      try {
+        // Gọi endpoint detail bạn đã viết trong backend
+        const res = await fetch(`http://localhost:8000/api/legislators/${memberId}/detail`);
+        
+        if (res.ok) {
+          const data = await res.json();
+          // data bao gồm: { profile: {...}, history: { committees: [...] }, ... }
+
+          // Mapping dữ liệu lịch sử ủy ban cho khớp với Component Frontend
+          const formattedCommittees = data.history?.committees?.map(c => ({
+             name: c.committee,       // DB: committee -> UI: name
+             startDate: c.start_date, // DB: start_date -> UI: startDate
+             endDate: c.end_date      // DB: end_date -> UI: endDate
+          })) || [];
+
+          // Cập nhật state profileData
+          setProfileData(prev => ({
+            ...prev,            // Giữ lại các trường cũ nếu cần
+            ...data.profile,    // Ghi đè bằng thông tin mới nhất từ DB
+            type: 'person',     // Đảm bảo type là person
+            committees: formattedCommittees // 🔥 Gắn danh sách lịch sử vào đây
+          }));
+        }
+      } catch (err) {
+        console.error("Failed to load details:", err);
+      }
+    };
+
+    // Chạy cả 2 hàm song song
+    fetchBills();
+    fetchDetail();
+
   }, [memberProfile]);
 
   // ------------- 2. FILTER / SEARCH -------------
@@ -86,7 +111,7 @@ useEffect(() => {
   };
 
   // ------------- 3. GUARD NẾU KHÔNG CÓ PROFILE -------------
-  if (!fullProfile) {
+  if (!memberProfile) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
         <p className="text-slate-500 mb-4">의원 정보를 찾을 수 없습니다.</p>
@@ -101,9 +126,8 @@ useEffect(() => {
 
     navigate('/analysis/detail', { 
       state: { 
-        legislatorName: memberProfile.name,
-        // đảm bảo có type và giữ nguyên member_id / id
-        legislatorProfile: { ...memberProfile, type: 'person' },
+        legislatorName: profileData?.name || memberProfile.name,
+        legislatorProfile: profileData, // Truyền profile mới nhất
         billInfo: bill,
         aiSummary,           // ✅ truyền AI summary sang LegislatorBillDetail
       } 
@@ -149,10 +173,14 @@ useEffect(() => {
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           
           {/* Profile + Bill table */}
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 sticky">
-            <LegislatorProfile
-              profile={{ ...memberProfile, type: 'person', total_bills: bills.length }}
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+           <LegislatorProfile
+              profile={{ 
+                ...profileData, 
+                total_bills: bills.length // Cập nhật số lượng bill thực tế
+              }}
             />
+            
             <LegislatorBillTable 
               bills={bills}
               onBillClick={goToDetail}

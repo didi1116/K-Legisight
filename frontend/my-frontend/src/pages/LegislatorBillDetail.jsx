@@ -55,7 +55,7 @@ export function LegislatorBillDetail() {
     billNumber: billInfo?.billNumber || "-",
     billName: billInfo?.billName || "법안 제목 정보 없음",
     date: billInfo?.date || "-",
-    score: billInfo?.score ?? 0,
+    score: billInfo?.scoreProbMean ?? 0,
     role: billInfo?.role || "-",
     meetingId: billInfo?.meetingId || null,
   };
@@ -193,7 +193,7 @@ export function LegislatorBillDetail() {
                 >
                   {displayBill.score}{" "}
                   <span className="text-xs text-slate-400 font-normal">
-                    /100
+                    
                   </span>
                 </div>
               </div>
