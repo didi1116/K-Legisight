@@ -9,6 +9,8 @@ import random
 from fastapi import FastAPI, Depends, HTTPException, status, Query
 import pandas as pd
 from build_member_stats import build_member_stats
+import ast
+from util_common import compute_score_prob, compute_speech_length
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -502,3 +504,144 @@ def get_dashboard_stats():
 @app.get("/")
 def read_root():
     return {"message": "K-LegiSight API is running!"}
+
+
+# [추가] 특정 의원의 '법안별' 통계 생성 API (build_member_bill_stats.py 로직 적용)
+@app.get("/api/member_bill_stat/{member_id}")
+def get_member_bill_stats_api(member_id: int):
+    try:
+        print(f"DEBUG /api/member_bill_stat/{member_id}")
+
+        # 1. DB에서 해당 member_id의 speeches 조회
+        response = (
+            supabase.table("speeches")
+            .select("*")
+            .eq("member_id", member_id)
+            .execute()
+        )
+        rows = response.data or []
+        
+        if not rows:
+            return {
+                "member_id": member_id,
+                "bill_stats": [],
+                "message": "해당 의원의 발언 데이터가 없습니다."
+            }
+
+        # 2. DataFrame 변환
+        df = pd.DataFrame(rows)
+
+        # ---------------------------------------------------------
+        # 로직 적용 (build_member_bill_stats.py 참조)
+        # ---------------------------------------------------------
+        
+        # (A) 확률 컬럼 보정 (DB 컬럼 우선, 없으면 sentiment_prob 파싱)
+        def get_prob(x, key):
+            if isinstance(x, dict):
+                return x.get(key, 0.0)
+            return 1.0 if key == "neutral" else 0.0
+
+        # DB에 prob_xxx 컬럼이 없거나 비어있을 경우 sentiment_prob에서 추출
+        if "prob_coop" not in df.columns or df["prob_coop"].isna().all():
+            if "sentiment_prob" in df.columns:
+                df["prob_noncoop"] = df["sentiment_prob"].apply(lambda x: get_prob(x, "noncoop"))
+                df["prob_coop"]    = df["sentiment_prob"].apply(lambda x: get_prob(x, "coop"))
+                df["prob_neutral"] = df["sentiment_prob"].apply(lambda x: get_prob(x, "neutral"))
+            else:
+                # 데이터가 아예 없으면 0 처리
+                df["prob_noncoop"] = 0.0
+                df["prob_coop"] = 0.0
+                df["prob_neutral"] = 1.0
+
+        # (B) score_prob 및 발언 길이 계산
+        if "score_prob" not in df.columns or df["score_prob"].isna().all():
+            df["score_prob"] = df.apply(lambda r: compute_score_prob(r.get("prob_coop", 0), r.get("prob_noncoop", 0)), axis=1)
+        
+        # speech_length가 없으면 계산
+        if "speech_length" not in df.columns:
+            df["speech_length"] = df["speech_text"].apply(compute_speech_length)
+
+        # (C) Bill Review 컬럼 준비 및 Explode
+        # DB 컬럼명이 'bill_numbers' 이거나 'bills' 일 수 있음. 로직상 'bill_review'로 통일 필요.
+        target_bill_col = None
+        for cand in ["bill_review", "bills", "bill_numbers"]:
+            if cand in df.columns:
+                target_bill_col = cand
+                break
+        
+        if target_bill_col:
+            # 문자열로 저장된 리스트("['법안A', '법안B']")를 실제 리스트로 변환
+            def parse_bill_list(val):
+                if isinstance(val, list):
+                    return val
+                if isinstance(val, str):
+                    try:
+                        # ast.literal_eval로 파싱 시도
+                        parsed = ast.literal_eval(val)
+                        if isinstance(parsed, list):
+                            return parsed
+                        return [val] # 리스트가 아니면 문자열 그대로 리스트화
+                    except:
+                        # 파싱 실패시 콤마 등으로 분리하거나 그대로 반환
+                        return [val]
+                return []
+
+            df["bill_review"] = df[target_bill_col].apply(parse_bill_list)
+            
+            # 행 확장 (Explode)
+            df = df.explode("bill_review")
+            df = df[df["bill_review"].notna()]
+            df = df[df["bill_review"] != ""] # 빈 문자열 제거
+        else:
+            # 법안 정보가 없으면 빈 리스트 반환
+            return {"member_id": member_id, "bill_stats": [], "message": "법안 정보 컬럼을 찾을 수 없습니다."}
+
+        if df.empty:
+             return {"member_id": member_id, "bill_stats": [], "message": "유효한 법안 발언 데이터가 없습니다."}
+
+        # (D) 의원 × 법안 단위 통계 집계
+        # member_name이 없으면 빈 문자열 처리
+        if "member_name" not in df.columns:
+            df["member_name"] = ""
+
+        agg = df.groupby(["member_id", "member_name", "bill_review"]).agg(
+            n_speeches=("speech_id", "count"),
+            total_speech_length_bill=("speech_length", "sum"),
+            avg_speech_length_bill=("speech_length", "mean"),
+            score_prob_mean=("score_prob", "mean")
+        ).reset_index()
+
+        # (E) Stance 판단
+        def stance(score):
+            if score > 0.15:
+                return "협력"
+            elif score < -0.15:
+                return "비협력"
+            return "중립"
+
+        agg["stance"] = agg["score_prob_mean"].apply(stance)
+        
+        # 포맷팅 (소수점 정리 - 선택사항, JSON 반환 시에는 float 유지 추천하지만 요청에 따라 문자열 변환 로직 포함 가능)
+        # 여기서는 API 응답용이므로 float 상태를 유지하거나, 필요시 포맷팅.
+        # 원본 로직 유지:
+        # agg["score_prob_mean"] = agg["score_prob_mean"].apply(lambda x: f"{x:.20f}") 
+
+        # (F) 정렬
+        agg = agg.sort_values(["bill_review"])
+
+        # 3. 결과 반환 (JSON 호환되는 dict list로 변환)
+        # NaN 값 등을 처리하기 위해 orient='records' 사용
+        result_data = agg.to_dict(orient="records")
+
+        return {
+            "member_id": member_id,
+            "count": len(result_data),
+            "bill_stats": result_data
+        }
+
+    except Exception as e:
+        print(f"Error calculating bill stats for member {member_id}:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+
