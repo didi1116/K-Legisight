@@ -169,6 +169,8 @@ def get_filters():
             "parties": [], "committees": [], "genders": [], 
             "regions": [], "counts": [], "methods": []
         }
+    
+
 # ==========================================
 # 2. SEARCH API (ĐÃ SỬA LOGIC LOOKUP)
 # ==========================================
@@ -236,6 +238,25 @@ def search_analysis(data: schemas.SearchInput):
             })
 
 
+        history_res = (
+            supabase.table("committees_history")
+            .select("committee, start_date, end_date")
+            .eq("member_id", member_pk)
+            .order("start_date", desc=True) # Mới nhất lên đầu
+            .execute()
+        )
+        
+        # Format dữ liệu cho khớp với Frontend (name, startDate, endDate)
+        raw_history = history_res.data or []
+        formatted_committees = []
+        
+        for h in raw_history:
+            formatted_committees.append({
+                "name": h.get("committee"),
+                "startDate": h.get("start_date"),
+                "endDate": h.get("end_date")
+            })
+
         c_id_result = target.get('committee_id')
         committee_display_name = id_to_name_map.get(c_id_result, "소속 위원회 없음")
 
@@ -246,7 +267,6 @@ def search_analysis(data: schemas.SearchInput):
             "name": target.get('name'),
             "party": target.get('party'),
             "committee": committee_display_name,
-            "committees": formatted_committees,
             "region": target.get('district') or target.get('region'),
             "gender": target.get('gender'),
             "count": target.get('elected_time'),
@@ -385,6 +405,10 @@ def get_legislator_bills(member_id: int):
             # 태도 / 점수
             stance = row.get("stance") or "중립"
             raw_prob = row.get("score_prob_mean")
+            
+            # 소수점 2자리로 제한
+            if raw_prob is not None:
+                raw_prob = round(raw_prob, 2)
 
             if raw_prob is not None:
                 raw_prob = round(raw_prob, 3)
@@ -446,7 +470,8 @@ def get_legislator_bills(member_id: int):
     except Exception as e:
         print("Error get_legislator_bills:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
-     
+ #수정 X
+    
 
 @app.get("/api/speeches")
 def get_speeches(
@@ -549,6 +574,382 @@ def get_speeches_by_member(member_id: int):
         print(f"Error fetching speeches for member {member_id}:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+# 의안번호 따로, 의안이름 따로.
+@app.get("/api/member_bill_stat/{member_id}")
+def get_member_bill_stats_api(member_id: int):
+    try:
+        print(f"DEBUG /api/member_bill_stat/{member_id}")
+
+        # 1. DB에서 해당 member_id의 speeches 조회
+        response = (
+            supabase.table("speeches")
+            .select("*")
+            .eq("member_id", member_id)
+            .execute()
+        )
+        rows = response.data or []
+        
+        if not rows:
+            return {
+                "member_id": member_id,
+                "bill_stats": [],
+                "message": "해당 의원의 발언 데이터가 없습니다."
+            }
+
+        # 2. DataFrame 변환
+        df = pd.DataFrame(rows)
+
+        # ---------------------------------------------------------
+        # 로직 적용 (build_member_bill_stats.py 참조)
+        # ---------------------------------------------------------
+        
+        # (A) 확률 컬럼 보정
+        def get_prob(x, key):
+            if isinstance(x, dict):
+                return x.get(key, 0.0)
+            return 1.0 if key == "neutral" else 0.0
+
+        if "prob_coop" not in df.columns or df["prob_coop"].isna().all():
+            if "sentiment_prob" in df.columns:
+                df["prob_noncoop"] = df["sentiment_prob"].apply(lambda x: get_prob(x, "noncoop"))
+                df["prob_coop"]    = df["sentiment_prob"].apply(lambda x: get_prob(x, "coop"))
+                df["prob_neutral"] = df["sentiment_prob"].apply(lambda x: get_prob(x, "neutral"))
+            else:
+                df["prob_noncoop"] = 0.0
+                df["prob_coop"] = 0.0
+                df["prob_neutral"] = 1.0
+
+        # (B) score_prob 및 발언 길이 계산
+        if "score_prob" not in df.columns or df["score_prob"].isna().all():
+            df["score_prob"] = df.apply(lambda r: compute_score_prob(r.get("prob_coop", 0), r.get("prob_noncoop", 0)), axis=1)
+        
+        if "speech_length" not in df.columns:
+            df["speech_length"] = df["speech_text"].apply(compute_speech_length)
+
+        # (C) Bill Review 컬럼 준비 및 Explode -> 'bill_id'로 이름 변경 [수정됨]
+        target_bill_col = None
+        for cand in ["bill_review", "bills", "bill_numbers"]:
+            if cand in df.columns:
+                target_bill_col = cand
+                break
+        
+        if target_bill_col:
+            def parse_bill_list(val):
+                if isinstance(val, list):
+                    return val
+                if isinstance(val, str):
+                    try:
+                        parsed = ast.literal_eval(val)
+                        if isinstance(parsed, list):
+                            return parsed
+                        return [val]
+                    except:
+                        return [val]
+                return []
+
+            # 여기서 컬럼명을 'bill_id'로 지정하여 저장
+            df["bill_id"] = df[target_bill_col].apply(parse_bill_list)
+            
+            df = df.explode("bill_id")
+            df = df[df["bill_id"].notna()]
+            df = df[df["bill_id"] != ""]
+        else:
+            return {"member_id": member_id, "bill_stats": [], "message": "법안 정보 컬럼을 찾을 수 없습니다."}
+
+        if df.empty:
+             return {"member_id": member_id, "bill_stats": [], "message": "유효한 법안 발언 데이터가 없습니다."}
+
+        # (D) 의원 × 법안 단위 통계 집계 ('bill_review' -> 'bill_id'로 변경)
+        if "member_name" not in df.columns:
+            df["member_name"] = ""
+
+        agg = df.groupby(["member_id", "member_name", "bill_id"]).agg(
+            n_speeches=("speech_id", "count"),
+            total_speech_length_bill=("speech_length", "sum"),
+            avg_speech_length_bill=("speech_length", "mean"),
+            score_prob_mean=("score_prob", "mean")
+        ).reset_index()
+
+        # (E) Stance 판단
+        def stance(score):
+            if score > 0.15:
+                return "협력"
+            elif score < -0.15:
+                return "비협력"
+            return "중립"
+
+        agg["stance"] = agg["score_prob_mean"].apply(stance)
+
+        # ---------------------------------------------------------
+        # [추가] bills 테이블에서 bill_name 가져오기
+        # ---------------------------------------------------------
+        # 1. 현재 집계된 데이터에 있는 모든 bill_id 추출
+        unique_bill_ids = agg["bill_id"].unique().tolist()
+        print(unique_bill_ids[:10])
+        print(f"DEBUG unique_bill_ids count = {len(unique_bill_ids)}")
+
+        # 2. Supabase bills 테이블 조회 (bill_id가 일치하는 것들)
+        if unique_bill_ids:
+            try:
+                bill_res = (
+                    supabase.table("bills")
+                    .select("bill_id, bill_name")
+                    .in_("bill_id", unique_bill_ids)
+                    .execute()
+                )
+                
+                # 3. 매핑 딕셔너리 생성 {bill_id: bill_name}
+                # bill_id가 DB에서는 int일 수 있고 df에서는 str일 수 있으므로 str로 통일하여 매핑
+                bill_name_map = {}
+                for item in (bill_res.data or []):
+                    b_id = str(item.get("bill_id"))
+                    b_name = item.get("bill_name")
+                    bill_name_map[b_id] = b_name
+
+                # 4. DataFrame에 bill_name 컬럼 추가
+                agg["bill_name"] = agg["bill_id"].astype(str).map(bill_name_map).fillna("법안명 없음")
+            
+            except Exception as e:
+                print("Error fetching bill names:", e)
+                agg["bill_name"] = "조회 실패"
+        else:
+            agg["bill_name"] = "-"
+
+        # (F) 정렬
+        agg = agg.sort_values(["bill_id"])
+
+        # 3. 결과 반환
+        result_data = agg.to_dict(orient="records")
+
+        return {
+            "member_id": member_id,
+            "count": len(result_data),
+            "bill_stats": result_data
+        }
+
+    except Exception as e:
+        print(f"Error calculating bill stats for member {member_id}:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# [추가] 특정 의원의 상세 정보(기본정보 + 상임위/정당 이력) 조회 API
+@app.get("/api/legislators/{member_id}/detail")
+def get_legislator_detail(member_id: int):
+
+    try:
+        print(f"DEBUG /api/legislators/{member_id}/detail")
+
+        # 1. 기본 정보 조회 (dimension 테이블)
+        # ---------------------------------------------------------
+        # committee_id 매핑을 위해 맵 가져오기
+        _, id_to_name_map = get_committee_maps()
+
+        dim_res = (
+            supabase.table("dimension")
+            .select("*")
+            .eq("member_id", member_id)
+            .execute()
+        )
+        
+        if not dim_res.data:
+            raise HTTPException(status_code=404, detail="의원 정보를 찾을 수 없습니다.")
+        
+        member_info = dim_res.data[0]
+        member_name = member_info.get("name") # 법안 조회에 사용할 이름
+
+        # 현재 소속 위원회 이름 변환
+        current_c_id = member_info.get("committee_id")
+        current_committee_name = id_to_name_map.get(current_c_id) or "소속 위원회 없음"
+
+        # 2. 상임위 활동 이력 조회 (committees_history 테이블)
+        # ---------------------------------------------------------
+        # 최신순 정렬 (start_date 내림차순)
+        comm_hist_res = (
+            supabase.table("committees_history")
+            .select("*")
+            .eq("member_id", member_id)
+            .order("start_date", desc=True)
+            .execute()
+        )
+        committee_history = comm_hist_res.data or []
+
+        # 3. 정당 이력 조회 (parties_history 테이블)
+        # ---------------------------------------------------------
+        # 최신순 정렬
+        party_hist_res = (
+            supabase.table("parties_history")
+            .select("*")
+            .eq("member_id", member_id)
+            .order("start_date", desc=True)
+            .execute()
+        )
+        party_history = party_hist_res.data or []
+
+        # 4. 대표 발의 법안 조회 (bills 테이블) [추가된 부분]
+        # ---------------------------------------------------------
+        # bills 테이블에는 member_id가 없으므로 이름(proposer_name)으로 조회합니다.
+        representative_bills = []
+        if member_name:
+            bills_res = (
+                supabase.table("bills")
+                .select("*")
+                .eq("proposer_name", member_name)  # 대표 발의자 이름 매칭
+                .order("proposer_date", desc=True) # 최신순 정렬
+                .execute()
+            )
+            representative_bills = bills_res.data or []
+
+        # 5. 결과 조합 및 반환
+        # ---------------------------------------------------------
+        return {
+            "member_id": member_id,
+            "profile": {
+                "name": member_info.get("name"),
+                "party": member_info.get("party"),
+                "district": member_info.get("district"),
+                "gender": member_info.get("gender"),
+                "elected_count": member_info.get("elected_time") or member_info.get("elected_count"), # 당선 횟수
+                "elected_type": member_info.get("elected_type"), # 지역구/비례대표
+                "committee": current_committee_name, # 현재 소속 상임위
+                "birthdate": member_info.get("birthdate"),
+                "age": member_info.get("age"),
+                "image_url": member_info.get("img") or member_info.get("image_url") or "",
+            },
+            "history": {
+                "committees": committee_history,
+                "parties": party_history
+            },
+            "representative_bills": representative_bills, # [추가] 조회된 법안 리스트
+            "message": "성공적으로 조회되었습니다."
+        }
+
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as e:
+        print(f"Error fetching legislator detail for {member_id}:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# [추가] 특정 의원의 상임위 활동 이력 조회 API
+@app.get("/api/legislators/{member_id}/committees_history")
+def get_member_committee_history(member_id: int):
+    try:
+        print(f"DEBUG /api/legislators/{member_id}/committees_history")
+
+        # committees_history 테이블 조회
+        # start_date 기준 내림차순 정렬 (최신 활동이 먼저 나오도록)
+        response = (
+            supabase.table("committees_history")
+            .select("*")
+            .eq("member_id", member_id)
+            .order("start_date", desc=True)
+            .execute()
+        )
+        
+        history = response.data or []
+        
+        return {
+            "member_id": member_id,
+            "count": len(history),
+            "history": history
+        }
+
+    except Exception as e:
+        print(f"Error fetching committee history for {member_id}:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# [추가] 특정 의원의 특정 법안에 대한 상세 발언 조회 API
+@app.get("/api/legislators/{member_id}/bills/{bill_id}/speeches")
+def get_member_bill_speeches_detail(member_id: int, bill_id: str):
+    try:
+        print(f"DEBUG /api/legislators/{member_id}/bills/{bill_id}/speeches")
+
+        # 1. 법안 이름 조회 (bills 테이블)
+        # ---------------------------------------------------------
+        bill_name = "법안명 없음"
+        try:
+            bill_res = (
+                supabase.table("bills")
+                .select("bill_name")
+                .eq("bill_id", bill_id)
+                .execute()
+            )
+            if bill_res.data:
+                bill_name = bill_res.data[0].get("bill_name")
+        except Exception as e:
+            print(f"Warning: Failed to fetch bill name for {bill_id}: {e}")
+
+        # 2. 해당 의원의 전체 발언 조회 (speeches 테이블)
+        # ---------------------------------------------------------
+        response = (
+            supabase.table("speeches")
+            .select("*")
+            .eq("member_id", member_id)
+            .execute()
+        )
+        rows = response.data or []
+
+        if not rows:
+            return {
+                "member_id": member_id,
+                "bill_id": bill_id,
+                "bill_name": bill_name,
+                "count": 0,
+                "speeches": [],
+                "message": "해당 의원의 발언 데이터가 없습니다."
+            }
+
+        # 3. Python 레벨에서 bill_id 포함 여부 필터링
+        # ---------------------------------------------------------
+        filtered_speeches = []
+        
+        for row in rows:
+            # 컬럼명이 bill_numbers, bill_review, bills 중 하나일 수 있음
+            bill_col_val = row.get("bill_numbers") or row.get("bill_review") or row.get("bills")
+            
+            # 리스트 파싱 (문자열 "['210001']" -> 리스트 ['210001'])
+            bills_list = []
+            if isinstance(bill_col_val, list):
+                bills_list = [str(b) for b in bill_col_val]
+            elif isinstance(bill_col_val, str):
+                try:
+                    # 리스트 형태 문자열 파싱 시도
+                    if bill_col_val.strip().startswith("["):
+                        parsed = ast.literal_eval(bill_col_val)
+                        if isinstance(parsed, list):
+                            bills_list = [str(b) for b in parsed]
+                        else:
+                            bills_list = [bill_col_val]
+                    else:
+                        # 단순 문자열이면 그대로 포함
+                        bills_list = [bill_col_val]
+                except:
+                    bills_list = [bill_col_val]
+            
+            # 해당 발언이 요청된 bill_id를 포함하고 있는지 확인
+            if str(bill_id) in bills_list:
+                filtered_speeches.append({
+                    "speech_id": row.get("speech_id"),
+                    "date": row.get("speech_date") or row.get("date"), # 날짜 컬럼이 있다면 추가
+                    "meeting_id": row.get("meeting_id"),
+                    "speech_text": row.get("speech_text"),
+                    "sentiment": row.get("sentiment_label"),
+                    "score": row.get("score_prob"),
+                    "prob_coop": row.get("prob_coop"),
+                    "prob_noncoop": row.get("prob_noncoop")
+                })
+
+        # 4. 결과 반환
+        return {
+            "member_id": member_id,
+            "bill_id": bill_id,
+            "bill_name": bill_name,
+            "count": len(filtered_speeches),
+            "speeches": filtered_speeches
+        }
+
+    except Exception as e:
+        print(f"Error fetching speeches for member {member_id}, bill {bill_id}:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ==========================================
 # 2. AUTHENTICATION & AI (GIỮ NGUYÊN)
@@ -607,222 +1008,8 @@ def read_root():
     return {"message": "K-LegiSight API is running!"}
 
 
-# [추가] 특정 의원의 '법안별' 통계 생성 API (build_member_bill_stats.py 로직 적용)
-@app.get("/api/member_bill_stat/{member_id}")
-def get_member_bill_stats_api(member_id: int):
-    try:
-        print(f"DEBUG /api/member_bill_stat/{member_id}")
 
-        # 1. DB에서 해당 member_id의 speeches 조회
-        response = (
-            supabase.table("speeches")
-            .select("*")
-            .eq("member_id", member_id)
-            .execute()
-        )
-        rows = response.data or []
-        
-        if not rows:
-            return {
-                "member_id": member_id,
-                "bill_stats": [],
-                "message": "해당 의원의 발언 데이터가 없습니다."
-            }
-
-        # 2. DataFrame 변환
-        df = pd.DataFrame(rows)
-
-        # ---------------------------------------------------------
-        # 로직 적용 (build_member_bill_stats.py 참조)
-        # ---------------------------------------------------------
-        
-        # (A) 확률 컬럼 보정 (DB 컬럼 우선, 없으면 sentiment_prob 파싱)
-        def get_prob(x, key):
-            if isinstance(x, dict):
-                return x.get(key, 0.0)
-            return 1.0 if key == "neutral" else 0.0
-
-        # DB에 prob_xxx 컬럼이 없거나 비어있을 경우 sentiment_prob에서 추출
-        if "prob_coop" not in df.columns or df["prob_coop"].isna().all():
-            if "sentiment_prob" in df.columns:
-                df["prob_noncoop"] = df["sentiment_prob"].apply(lambda x: get_prob(x, "noncoop"))
-                df["prob_coop"]    = df["sentiment_prob"].apply(lambda x: get_prob(x, "coop"))
-                df["prob_neutral"] = df["sentiment_prob"].apply(lambda x: get_prob(x, "neutral"))
-            else:
-                # 데이터가 아예 없으면 0 처리
-                df["prob_noncoop"] = 0.0
-                df["prob_coop"] = 0.0
-                df["prob_neutral"] = 1.0
-
-        # (B) score_prob 및 발언 길이 계산
-        if "score_prob" not in df.columns or df["score_prob"].isna().all():
-            df["score_prob"] = df.apply(lambda r: compute_score_prob(r.get("prob_coop", 0), r.get("prob_noncoop", 0)), axis=1)
-        
-        # speech_length가 없으면 계산
-        if "speech_length" not in df.columns:
-            df["speech_length"] = df["speech_text"].apply(compute_speech_length)
-
-        # (C) Bill Review 컬럼 준비 및 Explode
-        # DB 컬럼명이 'bill_numbers' 이거나 'bills' 일 수 있음. 로직상 'bill_review'로 통일 필요.
-        target_bill_col = None
-        for cand in ["bill_review", "bills", "bill_numbers"]:
-            if cand in df.columns:
-                target_bill_col = cand
-                break
-        
-        if target_bill_col:
-            # 문자열로 저장된 리스트("['법안A', '법안B']")를 실제 리스트로 변환
-            def parse_bill_list(val):
-                if isinstance(val, list):
-                    return val
-                if isinstance(val, str):
-                    try:
-                        # ast.literal_eval로 파싱 시도
-                        parsed = ast.literal_eval(val)
-                        if isinstance(parsed, list):
-                            return parsed
-                        return [val] # 리스트가 아니면 문자열 그대로 리스트화
-                    except:
-                        # 파싱 실패시 콤마 등으로 분리하거나 그대로 반환
-                        return [val]
-                return []
-
-            df["bill_review"] = df[target_bill_col].apply(parse_bill_list)
-            
-            # 행 확장 (Explode)
-            df = df.explode("bill_review")
-            df = df[df["bill_review"].notna()]
-            df = df[df["bill_review"] != ""] # 빈 문자열 제거
-        else:
-            # 법안 정보가 없으면 빈 리스트 반환
-            return {"member_id": member_id, "bill_stats": [], "message": "법안 정보 컬럼을 찾을 수 없습니다."}
-
-        if df.empty:
-             return {"member_id": member_id, "bill_stats": [], "message": "유효한 법안 발언 데이터가 없습니다."}
-
-        # (D) 의원 × 법안 단위 통계 집계
-        # member_name이 없으면 빈 문자열 처리
-        if "member_name" not in df.columns:
-            df["member_name"] = ""
-
-        agg = df.groupby(["member_id", "member_name", "bill_review"]).agg(
-            n_speeches=("speech_id", "count"),
-            total_speech_length_bill=("speech_length", "sum"),
-            avg_speech_length_bill=("speech_length", "mean"),
-            score_prob_mean=("score_prob", "mean")
-        ).reset_index()
-
-        # (E) Stance 판단
-        def stance(score):
-            if score > 0.15:
-                return "협력"
-            elif score < -0.15:
-                return "비협력"
-            return "중립"
-
-        agg["stance"] = agg["score_prob_mean"].apply(stance)
-        
-        # 포맷팅 (소수점 정리 - 선택사항, JSON 반환 시에는 float 유지 추천하지만 요청에 따라 문자열 변환 로직 포함 가능)
-        # 여기서는 API 응답용이므로 float 상태를 유지하거나, 필요시 포맷팅.
-        # 원본 로직 유지:
-        # agg["score_prob_mean"] = agg["score_prob_mean"].apply(lambda x: f"{x:.20f}") 
-
-        # (F) 정렬
-        agg = agg.sort_values(["bill_review"])
-
-        # 3. 결과 반환 (JSON 호환되는 dict list로 변환)
-        # NaN 값 등을 처리하기 위해 orient='records' 사용
-        result_data = agg.to_dict(orient="records")
-
-        return {
-            "member_id": member_id,
-            "count": len(result_data),
-            "bill_stats": result_data
-        }
-
-    except Exception as e:
-        print(f"Error calculating bill stats for member {member_id}:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-    
-
-
-# [추가] 특정 의원의 상세 정보(기본정보 + 상임위/정당 이력) 조회 API
-@app.get("/api/legislators/{member_id}/detail")
-def get_legislator_detail(member_id: int):
-    try:
-        print(f"DEBUG /api/legislators/{member_id}/detail")
-
-        # 1. 기본 정보 조회 (dimension 테이블)
-        # ---------------------------------------------------------
-        # committee_id 매핑을 위해 맵 가져오기
-        _, id_to_name_map = get_committee_maps()
-
-        dim_res = (
-            supabase.table("dimension")
-            .select("*")
-            .eq("member_id", member_id)
-            .execute()
-        )
-        
-        if not dim_res.data:
-            raise HTTPException(status_code=404, detail="의원 정보를 찾을 수 없습니다.")
-        
-        member_info = dim_res.data[0]
-
-        # 현재 소속 위원회 이름 변환
-        current_c_id = member_info.get("committee_id")
-        current_committee_name = id_to_name_map.get(current_c_id) or "소속 위원회 없음"
-
-        # 2. 상임위 활동 이력 조회 (committees_history 테이블)
-        # ---------------------------------------------------------
-        # 최신순 정렬 (start_date 내림차순)
-        comm_hist_res = (
-            supabase.table("committees_history")
-            .select("*")
-            .eq("member_id", member_id)
-            .order("start_date", desc=True)
-            .execute()
-        )
-        committee_history = comm_hist_res.data or []
-
-        # 3. 정당 이력 조회 (parties_history 테이블)
-        # ---------------------------------------------------------
-        # 최신순 정렬
-        party_hist_res = (
-            supabase.table("parties_history")
-            .select("*")
-            .eq("member_id", member_id)
-            .order("start_date", desc=True)
-            .execute()
-        )
-        party_history = party_hist_res.data or []
-
-        # 4. 결과 조합 및 반환
-        # ---------------------------------------------------------
-        return {
-            "member_id": member_id,
-            "profile": {
-                "name": member_info.get("name"),
-                "party": member_info.get("party"),
-                "district": member_info.get("district"),
-                "gender": member_info.get("gender"),
-                "elected_count": member_info.get("elected_time") or member_info.get("elected_count"), # 당선 횟수
-                "elected_type": member_info.get("elected_type"), # 지역구/비례대표
-                "committee": current_committee_name, # 현재 소속 상임위
-                "birthdate": member_info.get("birthdate"),
-                "age": member_info.get("age"),
-                "image_url": member_info.get("img") or member_info.get("image_url") or "",
-            },
-            "history": {
-                "committees": committee_history,
-                "parties": party_history
-            },
-            "message": "성공적으로 조회되었습니다."
-        }
-
-    except HTTPException as http_ex:
-        raise http_ex
-    except Exception as e:
-        print(f"Error fetching legislator detail for {member_id}:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
+@app.get("/api/bills/")
+def get_bills():
+    response = supabase.table("bills").select("*").limit(100).execute()
+    return {"bills": response.data}
