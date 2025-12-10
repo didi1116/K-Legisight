@@ -1,0 +1,104 @@
+erDiagram
+    %% Core Entity: Legislator (의원 정보)
+    dimension {
+        integer member_id PK "고유 ID"
+        varchar name "의원명"
+        integer party_id FK "정당 ID"
+        integer committee_id FK "현재 상임위 ID"
+        varchar district "지역구"
+        varchar gender "성별"
+        integer elected_time "당선 횟수"
+        varchar elected_type "당선 구분 (지역구/비례)"
+        date birthdate "생년월일"
+    }
+
+    %% Master Data: Parties (정당)
+    parties {
+        integer party_id PK
+        varchar name "정당명"
+        date ruling_start_date
+        date ruling_end_date
+    }
+
+    %% Master Data: Committees (상임위원회)
+    committees {
+        integer committee_id PK
+        text name "위원회명"
+    }
+
+    %% History Data: Committees & Parties
+    committees_history {
+        bigint number PK
+        integer member_id FK
+        integer committee_id FK
+        date start_date
+        date end_date
+    }
+
+    parties_history {
+        integer number PK
+        integer member_id FK
+        integer party_id FK
+        date start_date
+        date end_date
+    }
+
+    %% Activity Data: Speeches (발언)
+    speeches {
+        bigint speech_id PK
+        integer member_id FK
+        text speech_text "발언 내용"
+        bigint speech_length
+        text bill_numbers "관련 법안 번호"
+        double_precision score_prob "협력 점수"
+        text sentiment_label "성향 라벨"
+    }
+
+    %% Activity Data: Bills (법안)
+    bills {
+        bigint bill_id PK
+        text bill_name
+        text proposer_name
+        text status
+        text result
+        text pass_date
+    }
+
+    %% Activity Data: Meetings (회의)
+    meetings {
+        bigint meeting_id PK
+        text meeting_category
+        text meeting_date
+    }
+
+    %% Analytics Data (Derived Tables)
+    member_stats {
+        bigint member_id "FK (Logical)"
+        text member_name
+        text cooperation_score_prob
+        double_precision controversy_rate
+        bigint total_speeches
+    }
+
+    member_bill_stats {
+        bigint member_id "FK (Logical)"
+        text bill_id "Text Type (vs BigInt in bills)"
+        text stance "협력/비협력/중립"
+        double_precision score_prob_mean
+    }
+
+    %% Relationships (Explicit FKs)
+    dimension }o--|| parties : "소속 정당 (party_id)"
+    dimension }o--|| committees : "현재 상임위 (committee_id)"
+    
+    committees_history }o--|| dimension : "이력 (member_id)"
+    committees_history }o--|| committees : "상임위 (committee_id)"
+    
+    parties_history }o--|| dimension : "이력 (member_id)"
+    parties_history }o--|| parties : "정당 (party_id)"
+    
+    speeches }o--|| dimension : "발언자 (member_id)"
+
+    %% Logical Relationships (Implicit / Analytics)
+    member_stats }o--|| dimension : "통계 집계"
+    member_bill_stats }o--|| dimension : "법안별 통계"

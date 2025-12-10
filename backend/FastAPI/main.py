@@ -10,7 +10,8 @@ from fastapi import FastAPI, Depends, HTTPException, status, Query, APIRouter
 import pandas as pd
 from build_member_stats import build_member_stats
 from sqlalchemy.orm import Session
-
+from util_common import compute_score_prob, compute_speech_length
+import ast
 
 
 @asynccontextmanager
@@ -366,24 +367,50 @@ def get_legislator_bills(member_id: int):
         # [추가] 2️⃣ bills 테이블에서 bill_name 가져오기 (Look up)
         # ---------------------------------------------------------
         # row에 있는 'bill_id'를 사용하여 수집
-        bill_ids = [str(r.get("bill_id")) for r in rows if r.get("bill_id")]
+        bill_ids_raw = [r.get("bill_id") for r in rows]
+        print("DEBUG extracted bill_ids_raw =", bill_ids_raw)
+        print("DEBUG bill_ids_raw numbers =", len(bill_ids_raw))
+
+        # 숫자가 아닌 bill_id(예: "None", "", None 등) 제거 + int로 변환
+        valid_bill_ids: list[int] = []
+        for v in bill_ids_raw:
+            if v is None:
+                continue
+
+            s = str(v).strip()
+
+            # "None", "", 알 수 없는 문자열 등은 전부 제외
+            if not s.isdigit():
+                print(f"WARN: skip invalid bill_id value: {s!r}")
+                continue
+
+            valid_bill_ids.append(int(s))
+
+        # 중복 제거
+        bill_ids_for_query = sorted(set(valid_bill_ids))
+        print("DEBUG cleaned bill_ids_for_query =", bill_ids_for_query)
+        print( "DEBUG bill_ids_for_query count =", len(bill_ids_for_query))
+
         
-        bill_name_map = {}
-        if bill_ids:
+        bill_name_map: dict[str, str] = {}
+
+        if bill_ids_raw:
             try:
-                # bills 테이블에서 id가 bill_ids에 포함되는 것들 조회
                 bill_res = (
                     supabase.table("bills")
                     .select("bill_id, bill_name")
-                    .in_("bill_id", bill_ids)
+                    .in_("bill_id", bill_ids_for_query)   # <- 여기! in_에 들어가는 건 "값 리스트"
                     .execute()
                 )
-                
-                # 매핑 생성: { "2100001": "법안이름...", ... }
+
                 for b_item in (bill_res.data or []):
+                    # 매핑 생성: { "2100001": "법안이름...", ... }
                     b_id = str(b_item.get("bill_id"))
                     b_name = b_item.get("bill_name")
                     bill_name_map[b_id] = b_name
+
+                print("DEBUG fetched bill_name count =", len(bill_name_map))
+
             except Exception as e:
                 print("Error fetching bill names in get_legislator_bills:", e)
         # ---------------------------------------------------------
@@ -513,7 +540,7 @@ def get_speeches(
             speeches.append({
                 "id": row.get("speech_id") or idx,
                 "text": row.get("speech_text") or row.get("speech") or "",
-                "bills": row.get("bills"),
+                "bills": row.get("bill_numbers"),
                 "meetingId": row.get("meeting_id"),
                 "memberId": row.get("member_id"),
                 "sentiment": "중립",   # tạm thời mock
@@ -951,65 +978,4 @@ def get_member_bill_speeches_detail(member_id: int, bill_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ==========================================
-# 2. AUTHENTICATION & AI (GIỮ NGUYÊN)
-# ==========================================
 
-@app.post("/register", response_model=schemas.UserOut)
-def register_user(user: schemas.UserCreate):
-    try:
-        response = supabase.auth.sign_up({
-            "email": user.email,
-            "password": user.password,
-            "options": {"data": {"username": user.username, "full_name": user.full_name}}
-        })
-        if not response.user:
-             raise HTTPException(status_code=400, detail="실패")
-        return {
-             "email": response.user.email,
-             "username": response.user.user_metadata.get("username"),
-             "full_name": response.user.user_metadata.get("full_name")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/token")
-def login_for_access_token(user_data: schemas.UserLogin):
-    try:
-        response = supabase.auth.sign_in_with_password({
-            "email": user_data.email, "password": user_data.password
-        })
-        return {
-            "access_token": response.session.access_token, "token_type": "bearer",
-            "user": {"email": response.user.email, "username": response.user.user_metadata.get("username")}
-        }
-    except Exception:
-        raise HTTPException(status_code=401, detail="Email hoặc mật khẩu sai.")
-
-# ... (Các API AI khác giữ nguyên) ...
-
-@app.post("/sentiment", response_model=schemas.SentimentOutput)
-def analyze_sentiment(data_in: schemas.AnalysisInput, current_user = Depends(get_current_user)):
-    return {"label": "협력", "confidence_score": 0.95}
-
-@app.post("/prediction", response_model=schemas.PredictionOutput)
-def predict_legislation(data_in: schemas.AnalysisInput, current_user = Depends(get_current_user)):
-    return {"label": "가결 ", "probability": 0.88}
-
-@app.get("/api/dashboard-stats")
-def get_dashboard_stats():
-    return {
-        "sentiment": {"cooperative": 65, "non_cooperative": 35, "neutral": 0},
-        "prediction": {"bill_name": "AI 기본법 (안)", "probability": 87, "status": "예측 완료"}
-    }
-
-@app.get("/")
-def read_root():
-    return {"message": "K-LegiSight API is running!"}
-
-
-
-@app.get("/api/bills/")
-def get_bills():
-    response = supabase.table("bills").select("*").limit(100).execute()
-    return {"bills": response.data}
