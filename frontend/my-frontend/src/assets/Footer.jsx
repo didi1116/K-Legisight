@@ -29,15 +29,15 @@ export function Footer() {
           <div>
             <h3 className="text-white font-bold mb-4">바로가기</h3>
             <ul className="space-y-2 text-sm">
-              <li><a href="/sentiment" className="hover:text-blue-500 transition-colors">의원 분석</a></li>
+              <li><a href="/sentiment" className="hover:text-blue-500 transition-colors">감성 분석</a></li>
               <li><a href="#" className="hover:text-blue-500 transition-colors">법안 예측</a></li>
-              <li><a href="#" className="hover:text-blue-500 transition-colors">위원회 현황</a></li>
+
             </ul>
           </div>
 
           {/* Cột 3: Thông tin khác */}
           <div>
-            <h3 className="text-white font-bold mb-4">문의하기 (Contact)</h3>
+            <h3 className="text-white font-bold mb-4">문의하기</h3>
             <ul className="space-y-2 text-sm">
               <li className="flex items-center gap-2"> 
                 <Mail className="w-4 h-4" /> contact@k-legisight.com

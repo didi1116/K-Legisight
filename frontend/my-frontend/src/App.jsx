@@ -11,6 +11,9 @@ import { BillPrediction } from './pages/BillPrediction.jsx'
 import { PartyBillMembers } from './pages/PartyBillMembers.jsx'
 import { LegislatorDashboard } from './pages/LegislatorDashboard.jsx';
 import SentimentLanding from './pages/SentimentLanding.jsx'
+import PartyAnalysisPage from './pages/PartyAnalysisPage.jsx'
+import CommitteeAnalysisPage from './pages/CommitteeAnalysisPage.jsx'
+import { BillSearchPage } from './pages/BillSearchPage.jsx'
 
 
 import './index.css'
@@ -38,10 +41,12 @@ function App() {
         <Route path="/home" element={<Home />} />
         <Route path="/sentimentpage" element = {<SentimentLanding/>} />               //phân tích cảm xúc chính
         <Route path="/sentiment/member" element={<LegislatorAnalysis />} />           //phân tích nghị sĩ
-
         <Route path="/analysis/person-view" element={<LegislatorDashboard />} />      // Trang hồ sơ cá nhân nghị sĩ         
-        
-        <Route path ="//analysis/detail" element={<LegislatorBillDetail />} />        // Trang chi tiết dự luật của nghị sĩ
+        <Route path ="/analysis/detail" element={<LegislatorBillDetail />} />        // Trang chi tiết dự luật của nghị s
+        <Route path="/sentiment/party" element={<PartyAnalysisPage/>} />             //phân tích theo đảng trang chính
+        <Route path="/sentiment/committee" element={<CommitteeAnalysisPage/>}/>      //phân tích theo ủy ban
+        <Route path="/sentiment/bill" element={<BillSearchPage/>}/>
+
         <Route path ="/billprediction" element={<BillPrediction />} />                // Trang dự đoán dự luật
         <Route path ="/analysis/party-members" element={<PartyBillMembers />} />  
         

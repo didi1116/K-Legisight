@@ -94,3 +94,29 @@ class SearchResponse(BaseModel):
     profile: Optional[LegislatorProfile] = None
     results: List[BillInfo] = []  # Danh sách các bill liên quan
     ai_summary: Optional[str] = None
+
+
+
+
+
+# --- BILL ANALYSIS ---
+
+class BillSearchInput(BaseModel):
+    bill_name: Optional[str] = None      # Tên pháp án
+    bill_number: Optional[str] = None    # Số hiệu (의안번호)
+    proposer: Optional[str] = None       # Người phát ý (강득구, 정부...)
+    submission_type: Optional[str] = None # Loại: '의원' (Nghị sĩ) / '정부' (Chính phủ)
+
+class PartyScoreItem(BaseModel):
+    party_name: str
+    avg_score: float
+    member_count: int
+
+class BillAnalysisResponse(BaseModel):
+    bill_info: dict  # Thông tin cơ bản (Tên, ngày, người đề xuất...)
+    stats: dict = {
+        "total_speeches": 0,    # Tổng số phát biểu về bill này
+        "total_cooperation": 0.0, # Điểm hợp tác trung bình (Toàn bộ)
+        "party_breakdown": List[PartyScoreItem] # Điểm theo từng đảng
+    }
+    message: Optional[str] = None

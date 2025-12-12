@@ -1013,3 +1013,128 @@ def read_root():
 def get_bills():
     response = supabase.table("bills").select("*").limit(100).execute()
     return {"bills": response.data}
+
+
+
+
+
+
+@app.post("/api/bills/analysis", response_model=schemas.BillAnalysisResponse)
+def analyze_bill_centric(req: schemas.BillSearchInput):
+    try:
+        print(f"Searching Bill: {req.bill_name} | No: {req.bill_number}")
+
+        # --- BƯỚC 1: Tìm thông tin cơ bản của Bill (Metadata) ---
+        query = supabase.table("bills").select("*")
+
+        if req.bill_number:
+            query = query.eq("bill_no", req.bill_number) # Giả sử cột là bill_no hoặc bill_id
+        elif req.bill_name:
+            query = query.ilike("bill_name", f"%{req.bill_name}%")
+        
+        if req.proposer:
+            query = query.ilike("proposer", f"%{req.proposer}%")
+        
+        # Nếu có cột submission_type trong DB
+        # if req.submission_type:
+        #     query = query.eq("proposer_type", req.submission_type)
+
+        bills_res = query.limit(1).execute() # Lấy bill phù hợp nhất
+        bill_data = bills_res.data[0] if bills_res.data else None
+
+        if not bill_data:
+            return {
+                "bill_info": {},
+                "stats": {"total_speeches": 0, "total_cooperation": 0, "party_breakdown": []},
+                "message": "Không tìm thấy pháp án phù hợp."
+            }
+
+        target_bill_name = bill_data.get("bill_name")
+        print(f"Found Bill: {target_bill_name}")
+
+        # --- BƯỚC 2: Tính toán thống kê từ member_bill_stats ---
+        # Tìm tất cả bản ghi thống kê liên quan đến tên Bill này
+        # (Lưu ý: bill_review trong member_bill_stats là tên bill)
+        stats_query = (
+            supabase.table("member_bill_stats")
+            .select("*")
+            .ilike("bill_review", f"%{target_bill_name}%") 
+            .execute()
+        )
+        stats_rows = stats_query.data or []
+
+        if not stats_rows:
+             return {
+                "bill_info": bill_data,
+                "stats": {"total_speeches": 0, "total_cooperation": 0, "party_breakdown": []},
+                "message": "Pháp án này chưa có dữ liệu phân tích phát biểu."
+            }
+
+        # --- BƯỚC 3: Aggregation (Tính toán) ---
+        
+        total_speeches = 0
+        total_score_sum = 0
+        count_for_score = 0
+        
+        # Để tính theo đảng, ta cần map member_id -> party
+        # Lấy danh sách member_id từ kết quả stats để query bảng dimension
+        member_ids = [r['member_id'] for r in stats_rows]
+        
+        # Lấy thông tin đảng của các member này
+        dim_res = supabase.table("dimension").select("member_id, party").in_("member_id", member_ids).execute()
+        member_party_map = {d['member_id']: d['party'] for d in dim_res.data} # {101: 'TheMinjoo', ...}
+
+        party_agg = {} # { 'TheMinjoo': [score1, score2], 'PPP': [score...] }
+
+        for row in stats_rows:
+            # 1. Tổng phát biểu
+            n_speech = row.get("n_speeches_bill") or 0
+            total_speeches += n_speech
+
+            # 2. Xử lý điểm số
+            raw_prob = row.get("score_prob_mean")
+            if raw_prob is not None:
+                # Convert -1~1 to 0~100
+                score = max(0, min(100, round((float(raw_prob) + 1) / 2 * 100)))
+                
+                total_score_sum += score
+                count_for_score += 1
+
+                # 3. Gom nhóm theo đảng
+                m_id = row.get("member_id")
+                party = member_party_map.get(m_id, "Unknown")
+                
+                if party not in party_agg:
+                    party_agg[party] = []
+                party_agg[party].append(score)
+
+        # Tính trung bình tổng
+        avg_total_coop = round(total_score_sum / count_for_score, 1) if count_for_score > 0 else 50
+
+        # Tính trung bình theo đảng
+        party_breakdown = []
+        for p_name, scores in party_agg.items():
+            if p_name == "Unknown": continue
+            avg = round(sum(scores) / len(scores), 1)
+            party_breakdown.append({
+                "party_name": p_name,
+                "avg_score": avg,
+                "member_count": len(scores)
+            })
+
+        # Sắp xếp đảng nào hợp tác nhất lên đầu
+        party_breakdown.sort(key=lambda x: x['avg_score'], reverse=True)
+
+        return {
+            "bill_info": bill_data,
+            "stats": {
+                "total_speeches": total_speeches,
+                "total_cooperation": avg_total_coop,
+                "party_breakdown": party_breakdown
+            },
+            "message": "Phân tích hoàn tất."
+        }
+
+    except Exception as e:
+        print("Error Bill Analysis:", e)
+        raise HTTPException(status_code=500, detail=str(e))

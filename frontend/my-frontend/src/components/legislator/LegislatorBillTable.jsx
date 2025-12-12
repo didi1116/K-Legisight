@@ -11,7 +11,7 @@ export function LegislatorBillTable({ bills, onBillClick, showProposer = true })
     : "grid-cols-[40px_1.4fr_4.5fr_1.4fr_1fr_0.9fr]";      // 6 cols
 
   return (
-    <Card className="lg:col-span-3 shadow-sm border border-slate-200 flex flex-col h-[600px]">
+    <Card className="lg:col-span-3 shadow-sm border border-slate-200 flex flex-col h-[700px]">
       <CardHeader className="border-b px-6 py-4 bg-white">
         <CardTitle className="flex items-center gap-2 text-lg">
           <FileText className="w-5 h-5 text-slate-500" />

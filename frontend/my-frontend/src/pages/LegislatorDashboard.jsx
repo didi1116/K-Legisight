@@ -16,19 +16,29 @@ export function LegislatorDashboard() {
   const { memberProfile } = location.state || {};
 
   const [profileData, setProfileData] = useState(memberProfile || null);
-  // ---------------- STATE ----------------
+  
+  // ---------------- STATE DỮ LIỆU ----------------
   const [originalBills, setOriginalBills] = useState([]);
   const [bills, setBills] = useState([]);
   const [aiSummary, setAiSummary] = useState("");
 
+  // ---------------- STATE BỘ LỌC (Đã bổ sung đầy đủ) ----------------
   const [filterName, setFilterName] = useState("");
   const [filterBill, setFilterBill] = useState("");
+  
   const [selectedParty, setSelectedParty] = useState("all");
-  const [selectedCity, setSelectedCity] = useState('all');
+  const [selectedCity, setSelectedCity] = useState("all");
+  const [selectedDistrict, setSelectedDistrict] = useState("all"); // Mới
+  const [selectedCommittee, setSelectedCommittee] = useState("all"); // Mới
+  const [selectedGender, setSelectedGender] = useState("all"); // Mới
+  const [selectedAge, setSelectedAge] = useState("all"); // Mới
+  const [selectedCount, setSelectedCount] = useState("all"); // Mới
+  const [selectedMethod, setSelectedMethod] = useState("all"); // Mới
+
   const currentDistricts = DISTRICTS[selectedCity] || [];
 
   // ------------- 1. LOAD BILL DATA -------------
-useEffect(() => {
+  useEffect(() => {
     if (!memberProfile) return;
 
     // Ưu tiên member_id, fallback sang id
@@ -39,7 +49,7 @@ useEffect(() => {
       return;
     }
 
-    // 1. Hàm lấy danh sách Bill (Giữ nguyên)
+    // 1. Hàm lấy danh sách Bill
     const fetchBills = async () => {
       try {
         const res = await fetch(`http://localhost:8000/api/legislators/${memberId}/bills`);
@@ -47,36 +57,32 @@ useEffect(() => {
         const data = await res.json();
 
         setOriginalBills(data.bills || []);
-        setBills(data.bills || []);
+        setBills(data.bills || []); // Init bills list
         setAiSummary(data.ai_summary || "");
       } catch (err) {
         console.error("Failed to load bills:", err);
       }
     };
 
-    // 2. [MỚI] Hàm lấy chi tiết Profile + Lịch sử Ủy ban
+    // 2. Hàm lấy chi tiết Profile + Lịch sử Ủy ban
     const fetchDetail = async () => {
       try {
-        // Gọi endpoint detail bạn đã viết trong backend
         const res = await fetch(`http://localhost:8000/api/legislators/${memberId}/detail`);
         
         if (res.ok) {
           const data = await res.json();
-          // data bao gồm: { profile: {...}, history: { committees: [...] }, ... }
-
-          // Mapping dữ liệu lịch sử ủy ban cho khớp với Component Frontend
+          
           const formattedCommittees = data.history?.committees?.map(c => ({
-             name: c.committee,       // DB: committee -> UI: name
-             startDate: c.start_date, // DB: start_date -> UI: startDate
-             endDate: c.end_date      // DB: end_date -> UI: endDate
+             name: c.committee,       
+             startDate: c.start_date, 
+             endDate: c.end_date      
           })) || [];
 
-          // Cập nhật state profileData
           setProfileData(prev => ({
-            ...prev,            // Giữ lại các trường cũ nếu cần
-            ...data.profile,    // Ghi đè bằng thông tin mới nhất từ DB
-            type: 'person',     // Đảm bảo type là person
-            committees: formattedCommittees // 🔥 Gắn danh sách lịch sử vào đây
+            ...prev,            
+            ...data.profile,    
+            type: 'person',     
+            committees: formattedCommittees 
           }));
         }
       } catch (err) {
@@ -84,33 +90,46 @@ useEffect(() => {
       }
     };
 
-    // Chạy cả 2 hàm song song
     fetchBills();
     fetchDetail();
 
   }, [memberProfile]);
 
-  // ------------- 2. FILTER / SEARCH -------------
-  const handleSearch = () => {
-    let filtered = [...originalBills];
-
-    if (filterBill) {
-      filtered = filtered.filter(b => b.billName?.includes(filterBill));
-    }
-
-    // (filterName, selectedParty, selectedCity hiện chưa dùng – có thể bổ sung sau)
-    setBills(filtered);
-  };
-
+  // ------------- 2. FILTER / SEARCH -------------const handleSearch = () => {
+    // Gom tất cả các filter hiện tại thành 1 object
+    const handleSearch = () => {
+      // Gom tất cả các filter hiện tại thành 1 object
+      const filtersToPass = {
+         name: filterName,
+         party: selectedParty,
+         city: selectedCity,
+         district: selectedDistrict,
+         committee: selectedCommittee,
+         gender: selectedGender,
+         age: selectedAge,
+         count: selectedCount,
+         method: selectedMethod
+      };
+      navigate('/sentiment/member', { state: { incomingFilters: filtersToPass } });
+    };
+ 
   const handleReset = () => {
+    // Reset tất cả các state về mặc định
     setFilterName("");
     setFilterBill("");
     setSelectedParty("all");
     setSelectedCity("all");
+    setSelectedDistrict("all");
+    setSelectedCommittee("all");
+    setSelectedGender("all");
+    setSelectedAge("all");
+    setSelectedCount("all");
+    setSelectedMethod("all");
+
     setBills(originalBills);
   };
 
-  // ------------- 3. GUARD NẾU KHÔNG CÓ PROFILE -------------
+  // ------------- 3. GUARD -------------
   if (!memberProfile) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
@@ -120,16 +139,14 @@ useEffect(() => {
     );
   }
 
-  // ------------- 4. NAVEGATE TỚI TRANG DETAIL -------------
+  // ------------- 4. NAVIGATE DETAIL -------------
   const goToDetail = (bill) => {
-    console.log("DEBUG goToDetail bill:", bill);
-
     navigate('/analysis/detail', { 
       state: { 
         legislatorName: profileData?.name || memberProfile.name,
-        legislatorProfile: profileData, // Truyền profile mới nhất
+        legislatorProfile: profileData, 
         billInfo: bill,
-        aiSummary,           // ✅ truyền AI summary sang LegislatorBillDetail
+        aiSummary,           
       } 
     });
   };
@@ -154,17 +171,38 @@ useEffect(() => {
               의원 상세 정보
             </h1>
           </div>
-          <Button variant="outline" className="text-slate-600">
-            <Download className="w-4 h-4 mr-2" /> 프로필 다운로드
-          </Button>
         </div>
 
-        {/* Filter */}
+        {/* Filter - ĐÃ SỬA: Truyền đầy đủ Props Value */}
         <LegislatorFilter 
-          legislatorName={filterName} setLegislatorName={setFilterName}
-          billName={filterBill} setBillName={setFilterBill}
-          setSelectedParty={setSelectedParty} setSelectedCity={setSelectedCity}
+          // 1. Truyền Giá trị (Values)
+          legislatorName={filterName} 
+          billName={filterBill}
+          selectedParty={selectedParty}
+          selectedCity={selectedCity}
+          selectedDistrict={selectedDistrict}
+          selectedCommittee={selectedCommittee}
+          selectedGender={selectedGender}
+          selectedAge={selectedAge}
+          selectedCount={selectedCount}
+          selectedMethod={selectedMethod}
+          
+          // 2. Truyền Options
           currentDistricts={currentDistricts}
+          
+          // 3. Truyền Setters
+          setLegislatorName={setFilterName}
+          setBillName={setFilterBill}
+          setSelectedParty={setSelectedParty}
+          setSelectedCity={(val) => { setSelectedCity(val); setSelectedDistrict("all"); }} // Reset huyện khi đổi tỉnh
+          setSelectedDistrict={setSelectedDistrict}
+          setSelectedCommittee={setSelectedCommittee}
+          setSelectedGender={setSelectedGender}
+          setSelectedAge={setSelectedAge}
+          setSelectedCount={setSelectedCount}
+          setSelectedMethod={setSelectedMethod}
+          
+          // 4. Actions
           onSearch={handleSearch}
           onReset={handleReset}
         />
@@ -177,7 +215,7 @@ useEffect(() => {
            <LegislatorProfile
               profile={{ 
                 ...profileData, 
-                total_bills: bills.length // Cập nhật số lượng bill thực tế
+                total_bills: bills.length 
               }}
             />
             
@@ -198,7 +236,7 @@ useEffect(() => {
                 AI 요약 리포트 (AI Report)
               </h3>
               <p className="text-slate-300 leading-relaxed text-sm md:text-base">
-                {aiSummary}
+                {aiSummary || "AI 요약 정보가 없습니다."}
               </p>
             </div>
           </div>

@@ -36,29 +36,33 @@ export function LegislatorProfile({ profile }) {
         
         <ProfileRow label="유형" value={profile.method} />
         {profile.type === 'party' ? (
-             <ProfileRow label="의석수" value={profile.count} />
+          <ProfileRow label="의석수" value={profile.count} />
         ) : (
-            // Nếu là người, hiển thị danh sách lịch sử ủy ban
-            <div className="flex justify-between items-start py-1.5 gap-3 border-b border-slate-50">
+          // Nếu là người, hiển thị danh sách lịch sử ủy ban
+          <div className="flex justify-between items-start py-1.5 gap-3 border-b border-slate-50">
                 <span className="text-slate-500 w-20 shrink-0 text-left text-xs font-medium pt-1">소속위원회</span>
                 <div className="flex-1 flex flex-col gap-2">
                     {/* Kiểm tra nếu committees là mảng thì map, không thì hiện text cũ */}
                     {Array.isArray(profile.committees) && profile.committees.length > 0 ? (
-                        profile.committees.map((item, index) => (
-                            <div key={index} className="flex flex-col items-end">
+                      profile.committees.map((item, index) => (
+                        <div key={index} className="flex flex-col items-end">
                                 <span className="font-semibold text-slate-800 text-right text-sm">{item.name}</span>
                                 <span className="text-[11px] text-slate-400">
                                     {formatDate(item.startDate)} ~ {formatDate(item.endDate)}
                                 </span>
                             </div>
                         ))
-                    ) : (
+                      ) : (
                         <span className="font-semibold text-slate-800 text-right text-sm">{profile.committee || "N/A"}</span>
-                    )}
+                      )}
                 </div>
             </div>
         )}
 
+        <ProfileRow label="협력 법안수" value = {profile.name} />
+        <ProfileRow label="비협력 법안수" value = {profile.name} />
+        <ProfileRow label="중립 법안수" value = {profile.name} />
+        
 
         <div className="pt-4 mt-4 border-t border-slate-100">
           <div className="flex justify-between items-center">

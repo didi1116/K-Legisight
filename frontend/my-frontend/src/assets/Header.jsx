@@ -50,9 +50,8 @@ export function Header() {
           
           {/* Menu Links (Ẩn trên mobile) */}
           <nav className="hidden md:flex gap-6 text-sm font-medium text-slate-300">
-             <Link to="/sentiment" className="hover:text-white transition-colors">의원 분석</Link>
+             <Link to="/sentimentpage" className="hover:text-white transition-colors">감성 분석</Link>
              <Link to="/billprediction" className="hover:text-white transition-colors">법안 예측</Link>
-             <Link to="#" className="hover:text-white transition-colors">위원회 현황</Link>
           </nav>
 
           {/* User Info */}
