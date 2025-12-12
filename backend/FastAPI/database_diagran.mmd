@@ -1,0 +1,93 @@
+erDiagram
+    %% 메인 엔티티 정의
+    dimension {
+        integer member_id PK
+        character_varying name
+        integer party_id FK
+        integer committee_id FK
+        character_varying district
+        date birthdate
+    }
+
+    bills {
+        bigint bill_id PK
+        text bill_name
+        text proposer_name
+        text status
+        date pass_date
+    }
+
+    committees {
+        integer committee_id PK
+        text name
+    }
+
+    parties {
+        integer party_id PK
+        character_varying name
+        date ruling_start_date
+    }
+
+    meetings {
+        bigint meeting_id PK
+        text committee FK "committees.name과 텍스트 연결 추정"
+        date meeting_date
+    }
+
+    speeches {
+        bigint speech_id PK
+        integer member_id FK
+        text speech_text
+        text bill_numbers "비정규화된 법안 참조"
+    }
+
+    %% 이력 및 통계 테이블
+    committees_history {
+        bigint number PK
+        integer member_id FK
+        integer committee_id FK
+        date start_date
+        date end_date
+    }
+
+    parties_history {
+        integer number PK
+        integer member_id FK
+        integer party_id FK
+        date start_date
+        date end_date
+    }
+
+    member_stats {
+        bigint member_id FK "PK가 명시되지 않음, 유니크 추정"
+        bigint total_speeches
+        bigint bills_count
+    }
+
+    member_bill_stats {
+        bigint order PK
+        integer member_id FK
+        text bill_id FK "bills.bill_id(bigint)와 타입 불일치"
+        text stance
+    }
+
+    %% 관계 정의 (Relationships)
+
+    %% Dimension(의원) 중심 관계
+    dimension }|..|| parties : "현재 소속 정당 (party_id)"
+    dimension }|..|| committees : "현재 소속 위원회 (committee_id)"
+
+    %% 이력 테이블 관계
+    committees_history }|..|| dimension : "의원 이력 (member_id)"
+    committees_history }|..|| committees : "관련 위원회 (committee_id)"
+    parties_history }|..|| dimension : "의원 이력 (member_id)"
+    parties_history }|..|| parties : "관련 정당 (party_id)"
+
+    %% 활동 및 통계 관계
+    speeches }|..|| dimension : "발언자 (member_id)"
+    member_stats ||..|| dimension : "의원 통계 (member_id)"
+    member_bill_stats }|..|| dimension : "의원별 법안 통계 (member_id)"
+
+    %% 법안 및 회의 관계
+    member_bill_stats }|..|| bills : "관련 법안 (bill_id 타입 불일치)"
+    meetings }|..|| committees : "개최 위원회 (이름 텍스트 매칭)"

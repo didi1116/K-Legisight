@@ -13,6 +13,19 @@ from sqlalchemy.orm import Session
 from util_common import compute_score_prob, compute_speech_length
 import ast
 
+TABLE_PREVIEW_NAMES = [
+    "bills",
+    "committees",
+    "committees_history",
+    "dimension",
+    "meetings",
+    "member_bill_stats",
+    "member_stats",
+    "parties",
+    "parties_history",
+    "speeches",
+]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -78,6 +91,74 @@ def get_committee_maps():
 
     print("DEBUG id_to_name_map sample:", list(id_to_name.items())[:5])
     return name_to_id, id_to_name
+
+
+# --- 공통 헬퍼: 안전한 실수 파싱 / 청크 분할 / 스탠스 분류 ---
+def _safe_float(val):
+    """
+    Supabase 테이블에서 Excel 문자열 형태(\"=0.1\")로 저장된 값을 안전하게 float로 변환.
+    """
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+
+    if isinstance(val, str):
+        cleaned = val.strip().replace('"', "")
+        if cleaned.startswith("="):
+            cleaned = cleaned.lstrip("=")
+        try:
+            return float(cleaned)
+        except Exception:
+            return None
+    return None
+
+
+def _chunk_list(items, size=100):
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
+def _stance_from_score(score):
+    if score is None:
+        return "중립"
+    if score >= 0.05:
+        return "협력"
+    if score <= -0.05:
+        return "비협력"
+    return "중립"
+
+
+def _extract_member_score(row):
+    """
+    member_stats 테이블에서 협력도 점수를 안전하게 추출한다.
+    우선순위: cooperation_score_prob -> avg_score_prob -> (avg_prob_coop - avg_prob_noncoop)
+    """
+    score = _safe_float(row.get("cooperation_score_prob"))
+    if score is None:
+        score = _safe_float(row.get("avg_score_prob"))
+    if score is None:
+        coop = _safe_float(row.get("avg_prob_coop"))
+        noncoop = _safe_float(row.get("avg_prob_noncoop"))
+        if coop is not None and noncoop is not None:
+            score = coop - noncoop
+    return score
+
+
+def _extract_bill_score(row):
+    """
+    member_bill_stats 테이블에서 협력도 점수를 추출한다.
+    우선순위: score_prob_mean -> score_prob -> (prob_coop - prob_noncoop)
+    """
+    score = _safe_float(row.get("score_prob_mean"))
+    if score is None:
+        score = _safe_float(row.get("score_prob"))
+    if score is None:
+        coop = _safe_float(row.get("prob_coop"))
+        noncoop = _safe_float(row.get("prob_noncoop"))
+        if coop is not None and noncoop is not None:
+            score = coop - noncoop
+    return score
 
 
 
@@ -170,6 +251,188 @@ def get_filters():
             "parties": [], "committees": [], "genders": [], 
             "regions": [], "counts": [], "methods": []
         }
+    
+
+# ==========================================
+# 1-1. 정당 협력도 요약 API
+# ==========================================
+@app.get("/api/parties/{party_id}/summary")
+def get_party_summary(party_id: int):
+    """
+    정당 ID로 조회:
+      - 정당 총 협력도
+      - 협력도 상위/하위 5명의 의원
+      - 정당 주요 법안 찬성 상위/하위 5개
+    """
+    try:
+        # 1) 정당 기본 정보
+        party_res = (
+            supabase.table("parties")
+            .select("*")
+            .eq("party_id", party_id)
+            .limit(1)
+            .execute()
+        )
+        party_row = party_res.data[0] if party_res.data else None
+        if not party_row:
+            raise HTTPException(status_code=404, detail="정당을 찾을 수 없습니다.")
+
+        party_name = party_row.get("name") or party_row.get("party_name") or f"party-{party_id}"
+
+        # 2) 해당 정당 소속 의원 조회
+        dim_res = (
+            supabase.table("dimension")
+            .select("member_id, name, party_id, party")
+            .eq("party_id", party_id)
+            .execute()
+        )
+        members = dim_res.data or []
+        member_ids = [m.get("member_id") for m in members if m.get("member_id") is not None]
+        name_map = {m.get("member_id"): m.get("name") for m in members}
+
+        if not member_ids:
+            return {
+                "party_id": party_id,
+                "party_name": party_name,
+                "message": "해당 정당에 소속된 의원 데이터가 없습니다.",
+                "member_top5": [],
+                "member_bottom5": [],
+                "bill_top5": [],
+                "bill_bottom5": [],
+                "total_cooperation": None,
+                "analyzed_members": 0,
+            }
+
+        # 3) member_stats 가져와 협력도 산출
+        member_stats_rows = []
+        for chunk in _chunk_list(member_ids, size=150):
+            res = supabase.table("member_stats").select("*").in_("member_id", chunk).execute()
+            member_stats_rows.extend(res.data or [])
+
+        member_entries = []
+        for row in member_stats_rows:
+            m_id = row.get("member_id")
+            score = _extract_member_score(row)
+            if score is None:
+                continue
+
+            speeches_raw = row.get("total_speeches") or row.get("n_speeches")
+            try:
+                n_speeches = int(_safe_float(speeches_raw) or 0)
+            except Exception:
+                n_speeches = 0
+
+            member_entries.append({
+                "member_id": m_id,
+                "member_name": row.get("member_name") or name_map.get(m_id) or "이름 없음",
+                "cooperation_score": score,
+                "stance": _stance_from_score(score),
+                "total_speeches": n_speeches
+            })
+
+        # 총 협력도 (발언 수 가중 평균)
+        weight_sum = 0
+        score_sum = 0.0
+        for entry in member_entries:
+            w = entry["total_speeches"] if entry["total_speeches"] > 0 else 1
+            weight_sum += w
+            score_sum += entry["cooperation_score"] * w
+        total_cooperation = round(score_sum / weight_sum, 4) if weight_sum > 0 else None
+
+        # 상/하위 5명
+        sorted_members = sorted(member_entries, key=lambda x: x["cooperation_score"])
+        member_bottom5 = sorted_members[:5]
+        member_top5 = list(reversed(sorted_members[-5:]))
+
+        # 4) 정당 주요 법안 (member_bill_stats 기반)
+        bill_rows = []
+        for chunk in _chunk_list(member_ids, size=120):
+            res = (
+                supabase.table("member_bill_stats")
+                .select("*")
+                .in_("member_id", chunk)
+                .execute()
+            )
+            bill_rows.extend(res.data or [])
+
+        bill_agg = {}
+        for row in bill_rows:
+            bill_id = row.get("bill_id") or row.get("bill_number") or row.get("billNo")
+            if bill_id is None or str(bill_id).strip() == "":
+                continue
+            bill_id = str(bill_id)
+
+            score = _extract_bill_score(row)
+            if score is None:
+                continue
+
+            weight_raw = row.get("n_speeches_bill") or row.get("n_speech_bill") or row.get("n_speeches") or 1
+            try:
+                weight = float(_safe_float(weight_raw) or 1.0)
+            except Exception:
+                weight = 1.0
+
+            if bill_id not in bill_agg:
+                bill_agg[bill_id] = {
+                    "weighted_sum": 0.0,
+                    "weight": 0.0,
+                    "samples": 0,
+                    "bill_review": row.get("bill_review")
+                }
+
+            bill_agg[bill_id]["weighted_sum"] += score * weight
+            bill_agg[bill_id]["weight"] += weight
+            bill_agg[bill_id]["samples"] += 1
+
+        # bill_id -> bill_name 매핑
+        bill_name_map = {}
+        bill_ids = list(bill_agg.keys())
+        for chunk in _chunk_list(bill_ids, size=150):
+            try:
+                bill_res = (
+                    supabase.table("bills")
+                    .select("bill_id, bill_name")
+                    .in_("bill_id", chunk)
+                    .execute()
+                )
+                for item in bill_res.data or []:
+                    bill_name_map[str(item.get("bill_id"))] = item.get("bill_name")
+            except Exception as e:
+                print("WARN: bill lookup chunk failed:", e)
+
+        bill_entries = []
+        for b_id, agg in bill_agg.items():
+            if agg["weight"] <= 0:
+                continue
+            avg_score = agg["weighted_sum"] / agg["weight"]
+            bill_entries.append({
+                "bill_id": b_id,
+                "bill_name": bill_name_map.get(b_id) or agg.get("bill_review") or b_id,
+                "cooperation_score": avg_score,
+                "stance": _stance_from_score(avg_score),
+                "samples": agg["samples"]
+            })
+
+        bill_entries_sorted = sorted(bill_entries, key=lambda x: x["cooperation_score"])
+        bill_bottom5 = bill_entries_sorted[:5]
+        bill_top5 = list(reversed(bill_entries_sorted[-5:]))
+
+        return {
+            "party_id": party_id,
+            "party_name": party_name,
+            "total_cooperation": total_cooperation,
+            "analyzed_members": len(member_entries),
+            "member_top5": member_top5,
+            "member_bottom5": member_bottom5,
+            "bill_top5": bill_top5,
+            "bill_bottom5": bill_bottom5,
+        }
+
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as e:
+        print("Error in get_party_summary:", e)
+        raise HTTPException(status_code=500, detail="정당 분석 중 오류가 발생했습니다.")
     
 
 # ==========================================
@@ -1165,3 +1428,25 @@ def analyze_bill_centric(req: schemas.BillSearchInput):
     except Exception as e:
         print("Error Bill Analysis:", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+# [추가] public 스키마의 각 테이블에서 5개 행씩 미리보기 제공
+def _fetch_table_preview(table_name: str, limit: int):
+    """
+    Helper to fetch a small sample for a given table.
+    """
+    try:
+        res = supabase.table(table_name).select("*").limit(limit).execute()
+        return res.data or []
+    except Exception as e:
+        print(f"Error fetching preview for {table_name}:", e)
+        return {"error": str(e)}
+
+
+@app.get("/api/public-table-previews")
+def get_public_table_previews(limit: int = 5):
+    """
+    Return up to 5 rows (default) from every public schema table defined in TABLE_PREVIEW_NAMES.
+    """
+    safe_limit = max(1, min(limit, 50))  # guardrails to prevent heavy scans
+    previews = {name: _fetch_table_preview(name, safe_limit) for name in TABLE_PREVIEW_NAMES}
+    return {"limit": safe_limit, "tables": previews}
