@@ -37,11 +37,34 @@ export function LegislatorDashboard() {
 
   const currentDistricts = DISTRICTS[selectedCity] || [];
 
-  // ------------- 1. LOAD BILL DATA -------------
+  const stats = {
+    coop: 0,
+    nonCoop: 0,
+    neutral: 0
+  };
+
+  if (bills && bills.length > 0) {
+    bills.forEach(bill => {
+      // 1. Ưu tiên lấy text từ 'sentiment' (ví dụ: "협력")
+      // 2. Nếu không có, mới lấy từ 'score' (phòng trường hợp data thô của bạn để chữ ở đây)
+      const sentimentVal = bill.sentiment || bill.score || "";
+      
+      if (sentimentVal === "협력") {
+        stats.coop += 1;
+      } else if (sentimentVal === "비협력") {
+        stats.nonCoop += 1;
+      } else {
+        // Các trường hợp còn lại (Trung lập, hoặc không xác định)
+        stats.neutral += 1;
+      }
+    });
+  }
+
+  // ------------- 1. LOAD BILL DATA & DETAIL PROFILE -------------
   useEffect(() => {
     if (!memberProfile) return;
 
-    // Ưu tiên member_id, fallback sang id
+    // Ưu tiên member_id, fallback sang id (đề phòng trường hợp id khác tên)
     const memberId = memberProfile.member_id ?? memberProfile.id;
     
     if (!memberId) {
@@ -57,30 +80,33 @@ export function LegislatorDashboard() {
         const data = await res.json();
 
         setOriginalBills(data.bills || []);
-        setBills(data.bills || []); // Init bills list
+        setBills(data.bills || []); 
         setAiSummary(data.ai_summary || "");
       } catch (err) {
         console.error("Failed to load bills:", err);
       }
     };
 
-    // 2. Hàm lấy chi tiết Profile + Lịch sử Ủy ban
+    // 2. Hàm lấy chi tiết Profile + Lịch sử Ủy ban (Code bạn vừa sửa)
     const fetchDetail = async () => {
       try {
+        // Gọi API chi tiết
         const res = await fetch(`http://localhost:8000/api/legislators/${memberId}/detail`);
         
         if (res.ok) {
           const data = await res.json();
           
+          // Format lại lịch sử ủy ban cho đúng chuẩn hiển thị
           const formattedCommittees = data.history?.committees?.map(c => ({
              name: c.committee,       
              startDate: c.start_date, 
              endDate: c.end_date      
           })) || [];
 
+          // Cập nhật State: Giữ cái cũ (prev) + Ghi đè cái mới (data.profile)
           setProfileData(prev => ({
             ...prev,            
-            ...data.profile,    
+            ...data.profile,    // <-- Dữ liệu khu vực, giới tính, ngày sinh nằm ở đây
             type: 'person',     
             committees: formattedCommittees 
           }));
@@ -90,11 +116,12 @@ export function LegislatorDashboard() {
       }
     };
 
+    // Chạy song song cả 2 hàm
     fetchBills();
     fetchDetail();
 
   }, [memberProfile]);
-
+  
   // ------------- 2. FILTER / SEARCH -------------const handleSearch = () => {
     // Gom tất cả các filter hiện tại thành 1 object
     const handleSearch = () => {
@@ -215,7 +242,10 @@ export function LegislatorDashboard() {
            <LegislatorProfile
               profile={{ 
                 ...profileData, 
-                total_bills: bills.length 
+                total_bills: bills.length,
+                count_coop: stats.coop,
+                count_non_coop: stats.nonCoop,
+                count_neutral: stats.neutral
               }}
             />
             

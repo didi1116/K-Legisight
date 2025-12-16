@@ -59,15 +59,15 @@ export function LegislatorFilter({
                     <SelectItem value="all">소속정당 전체</SelectItem>
                     <SelectItem value="더불어민주당">더불어민주당</SelectItem>
                     <SelectItem value="국민의힘">국민의힘</SelectItem>
-                    <SelectItem value="조국혁신당">조국혁신당</SelectItem>
-                    <SelectItem value="개혁신당">개혁신당</SelectItem>
-                    <SelectItem value="진보당">진보당</SelectItem>
-                    <SelectItem value="새로운미래">새로운미래</SelectItem>
                     <SelectItem value="기본소득당">기본소득당</SelectItem>
-                    <SelectItem value="사회민주당">사회민주당</SelectItem>
-                    <SelectItem value="무소속">무소속</SelectItem>
+                    <SelectItem value="국민의당">국민의당</SelectItem>
+                    <SelectItem value="열린민주당">열린민주당</SelectItem>
+                    <SelectItem value="미래통합당">미래통합당</SelectItem>
+                    <SelectItem value="미래한국당">미래한국당</SelectItem>
                     <SelectItem value="정의당">정의당</SelectItem>
-                    <SelectItem value="자유통일당">자유통일당</SelectItem>
+                    <SelectItem value="새로운미래">새로운미래</SelectItem>
+                    <SelectItem value="시대전환">시대전환</SelectItem>
+                    <SelectItem value="무소속">무소속</SelectItem>
               </SelectContent>
             </Select>
           </FilterItem>

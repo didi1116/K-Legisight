@@ -59,9 +59,20 @@ export function LegislatorProfile({ profile }) {
             </div>
         )}
 
-        <ProfileRow label="협력 법안수" value = {profile.name} />
-        <ProfileRow label="비협력 법안수" value = {profile.name} />
-        <ProfileRow label="중립 법안수" value = {profile.name} />
+        <div className="py-2 space-y-1">
+            <ProfileRow 
+                label="협력 법안" 
+                value={<span className="text-blue-600 font-bold">{profile.count_coop || 0}건</span>} 
+            />
+            <ProfileRow 
+                label="비협력 법안" 
+                value={<span className="text-red-500 font-bold">{profile.count_non_coop || 0}건</span>} 
+            />
+            <ProfileRow 
+                label="중립 법안" 
+                value={<span className="text-slate-500">{profile.count_neutral || 0}건</span>} 
+            />
+        </div>
         
 
         <div className="pt-4 mt-4 border-t border-slate-100">
@@ -94,3 +105,4 @@ function formatDate(dateString) {
     }
     return dateString; 
 }
+
