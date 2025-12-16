@@ -1,174 +1,172 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-build_party_bill_ranking.py
-==============================================================
-📌 목적:
-정당별로 "모든 법안의 협력도 순위를 완전한 형태로" 생성하여 CSV로 저장한다.
+정당별 법안 협력도 랭킹 생성기.
 
-✔ 왜 필요한가?
-- 정당이 어떤 법안을 가장 협력적으로 대했는지(상위 5)
-- 어떤 법안에 가장 비협력적이었는지(하위 5)
-- 중위권 법안은 어떤 것들인지
-이를 UI에서 간단하게 필터링할 수 있도록,
-전체 법안 목록을 정당별 순위로 구조화해 제공하는 스크립트이다.
+이전 버전은 all_party.pkl 과 bill_review 문자열을 사용했지만,
+지금은 Supabase 테이블 구조(또는 동일한 dict 형태의 데이터)를 바로 받아
+전처리 후 랭킹을 계산한다.
 
-✔ 핵심 기능 요약:
-1) all_party.pkl 로드 → bill_review 리스트 explode
-2) util_bill.parse_bill_string() 사용해 robust 법안명/의안번호 파싱
-3) 정당 × 법안 단위로 협력도 평균 계산
-4) 발언수가 적어서 평균이 튀는 문제를 방지하기 위해
-   → 베이시안 보정 점수(bayesian_score) 적용
-5) 정당 내부 rank 1~N 전체 부여
-6) CSV 저장 → UI에서 top5 / bottom5 쉽게 필터링 가능
+필수 테이블 키(모두 dict/list 형태):
+  - dimension          : 의원 기본 정보 (member_id, party_id, party 등)
+  - parties            : 정당 정보 (party_id, name)
+  - bills              : 법안 정보 (bill_id, bill_name)
+  - member_bill_stats  : 의원 × 법안 단위 협력도/발언 수
 
-📌 입력:
-  ./output_party/all_party.pkl
-    → b_load_party_data.py 에서 생성된 최종 발언 데이터
-
-📌 출력:
-  ./output_party/party_bill_ranking.csv
-
-📌 최종 CSV 컬럼 구조:
-  party_name        : 정당명
-  bill_name         : 정제된 법안명
-  bill_number       : 의안번호 (없을 경우 None)
-  speech_count      : 해당 정당의 법안 발언 수
-  avg_score_prob    : 원래 평균 협력도 (coop - noncoop)
-  bayesian_score    : 발언량을 고려한 안정적 점수
-  rank_in_party     : bayesian_score 기준 정당 내부 순위 (1등 = 최고 협력)
-==============================================================
+입력 예시는 README 상의 table example 형태를 따른다.
 """
+
+from __future__ import annotations
 
 import os
+from typing import Dict, List, Optional, Any
+
 import pandas as pd
-from util_bill import parse_bill_string
 
 
-# ==============================================================  
-# 경로 설정
-# ==============================================================  
-INPUT_PICKLE = "./output_party/all_party.pkl"
-OUTPUT_CSV   = "./output_party/party_bill_ranking.csv"
+def _safe_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        cleaned = val.strip().replace('"', "")
+        if cleaned.startswith("="):
+            cleaned = cleaned.lstrip("=")
+        try:
+            return float(cleaned)
+        except Exception:
+            return None
+    return None
 
 
-# ==============================================================  
-# 베이시안 보정 함수
-# ==============================================================  
-def bayesian_adjusted_score(avg, n, baseline=0.0, weight=30):
-    """
-    베이시안 점수 계산 공식:
-    
-       score = (avg * n + baseline * weight) / (n + weight)
+def _safe_int(val: Any, default: int = 0) -> int:
+    try:
+        if val is None:
+            return default
+        return int(float(val))
+    except Exception:
+        return default
 
-    ✔ avg      : 법안의 원래 평균 협력도
-    ✔ n        : 해당 법안에 대한 발언 수
-    ✔ baseline : 모든 법안의 전체 평균 협력도
-    ✔ weight   : 발언 수가 적을 때 baseline이 얼마나 영향을 줄지 결정 (기본 30)
 
-    → 발언수가 적으면 baseline에 가까워져서 점수 튐 방지
-    → 발언수가 많으면 avg를 거의 그대로 반영함
-    """
+def bayesian_adjusted_score(avg: float, n: float, baseline: float = 0.0, weight: int = 30) -> float:
     return (avg * n + baseline * weight) / (n + weight)
 
 
-# ==============================================================  
-# 메인 실행부
-# ==============================================================  
-if __name__ == "__main__":
+def _extract_score(row: pd.Series) -> Optional[float]:
+    for key in ("score_prob_mean", "score_prob"):
+        if key in row and pd.notna(row[key]):
+            val = _safe_float(row[key])
+            if val is not None:
+                return val
 
-    print("\n[INFO] 정당별 법안 협력도 전체 순위표 생성 시작...")
-
-    # ----------------------------------------------------------
-    # 1) 데이터 로드
-    # ----------------------------------------------------------
-    if not os.path.exists(INPUT_PICKLE):
-        raise FileNotFoundError(f"[ERROR] 파일 없음: {INPUT_PICKLE}")
-
-    df = pd.read_pickle(INPUT_PICKLE)
-
-    # 정당 미매칭 제거
-    df = df[df["party_name"].notna()].copy()
-
-    if df.empty:
-        raise RuntimeError("[ERROR] 정당 매칭된 발언이 없습니다.")
-
-    # bill_review 가 빈 리스트거나 None → 제거
-    df = df[df["bill_review"].apply(lambda x: isinstance(x, list) and len(x) > 0)]
-
-    # bill_review 리스트 explode (법안 1개씩 한 행)
-    df = df.explode("bill_review")
+    coop = _safe_float(row.get("prob_coop"))
+    noncoop = _safe_float(row.get("prob_noncoop"))
+    if coop is not None and noncoop is not None:
+        return coop - noncoop
+    return None
 
 
-    # ----------------------------------------------------------
-    # 2) util_bill 활용하여 법안명 / 의안번호 파싱
-    # ----------------------------------------------------------
-    print("[INFO] 법안 문자열 파싱 중...")
+def build_party_bill_ranking(tables: Dict[str, List[Dict[str, Any]]]) -> pd.DataFrame:
+    member_bill = pd.DataFrame(tables.get("member_bill_stats") or [])
+    if member_bill.empty:
+        raise ValueError("member_bill_stats 테이블이 비어 있습니다.")
 
-    df["bill_name"], df["bill_proposer"], df["bill_number"] = zip(
-        *df["bill_review"].apply(parse_bill_string)
+    dimension = pd.DataFrame(tables.get("dimension") or [])
+    bills = pd.DataFrame(tables.get("bills") or [])
+    parties = pd.DataFrame(tables.get("parties") or [])
+
+    party_lookup = {}
+    if not parties.empty:
+        try:
+            parties = parties.rename(columns={"name": "party_name"})
+            parties["party_id"] = parties["party_id"].apply(_safe_int)
+            party_lookup = parties.set_index("party_id")["party_name"].to_dict()
+        except Exception:
+            party_lookup = {}
+
+    member_party = pd.DataFrame(columns=["member_id", "party_id", "party_name"])
+    if not dimension.empty:
+        member_party = dimension[["member_id", "party_id", "party"]].copy()
+        member_party = member_party.rename(columns={"party": "party_name"})
+        member_party["party_id"] = member_party["party_id"].apply(_safe_int)
+        member_party["party_name"] = member_party["party_name"].fillna(
+            member_party["party_id"].map(party_lookup)
+        )
+
+    member_bill = member_bill.merge(member_party, on="member_id", how="left")
+    member_bill["party_name"] = member_bill["party_name"].fillna(
+        member_bill["party_id"].map(party_lookup)
     )
 
-    # bill_name 없는 경우 제거 (거의 없음)
-    df = df[df["bill_name"].notna()]
+    if not bills.empty:
+        bills = bills.rename(columns={"bill_name": "bill_title"})
+        bills["bill_id"] = bills["bill_id"].astype(str)
+        member_bill["bill_id"] = member_bill["bill_id"].astype(str)
+        member_bill = member_bill.merge(
+            bills[["bill_id", "bill_title"]],
+            on="bill_id",
+            how="left",
+        )
+    else:
+        member_bill["bill_title"] = None
 
+    member_bill["score"] = member_bill.apply(_extract_score, axis=1)
+    member_bill["n_speeches"] = member_bill.get("n_speeches", pd.Series([1] * len(member_bill))).apply(
+        lambda x: max(_safe_int(x, default=1), 1)
+    )
 
-    # ----------------------------------------------------------
-    # 3) 정당 × 법안 단위 통계 계산
-    # ----------------------------------------------------------
-    print("[INFO] 정당 × 법안 단위 협력도 집계 중...")
+    member_bill = member_bill.dropna(subset=["party_name", "bill_id", "score"])
+
+    member_bill["weighted_score"] = member_bill["score"] * member_bill["n_speeches"]
 
     grouped = (
-        df.groupby(["party_name", "bill_name", "bill_number"])
+        member_bill.groupby(["party_id", "party_name", "bill_id", "bill_title"], as_index=False)
         .agg(
-            speech_count=("speech_id", "count"),
-            avg_score_prob=("score_prob", "mean")
+            speech_count=("n_speeches", "sum"),
+            score_sum=("weighted_score", "sum"),
         )
-        .reset_index()
     )
 
-    # baseline = 모든 법안 평균 협력도
+    if grouped.empty:
+        raise ValueError("집계 결과가 없습니다. 입력 데이터를 확인하세요.")
+
+    grouped["avg_score_prob"] = grouped["score_sum"] / grouped["speech_count"]
     baseline = grouped["avg_score_prob"].mean()
 
-
-    # ----------------------------------------------------------
-    # 4) 베이시안 점수 계산
-    # ----------------------------------------------------------
     grouped["bayesian_score"] = grouped.apply(
         lambda r: bayesian_adjusted_score(
             avg=r["avg_score_prob"],
             n=r["speech_count"],
             baseline=baseline,
-            weight=30
+            weight=30,
         ),
-        axis=1
+        axis=1,
     )
-
-
-    # ----------------------------------------------------------
-    # 5) 정당 내부 순위 부여
-    # ----------------------------------------------------------
-    print("[INFO] 정당별 순위 계산 중...")
 
     grouped["rank_in_party"] = (
-        grouped.groupby("party_name")["bayesian_score"]
-               .rank(method="first", ascending=False)  # 높은 점수가 1등
-               .astype(int)
+        grouped.groupby("party_id")["bayesian_score"]
+        .rank(method="first", ascending=False)
+        .astype(int)
     )
 
-    # 정당명 → 순위 순으로 정렬
     grouped = grouped.sort_values(["party_name", "rank_in_party"])
 
+    grouped = grouped.rename(columns={"bill_title": "bill_name"})
+    grouped = grouped[
+        [
+            "party_id",
+            "party_name",
+            "bill_name",
+            "bill_id",
+            "speech_count",
+            "avg_score_prob",
+            "bayesian_score",
+            "rank_in_party",
+        ]
+    ]
 
-    # ----------------------------------------------------------
-    # 6) CSV 저장
-    # ----------------------------------------------------------
-    os.makedirs("./output_party", exist_ok=True)
-    grouped.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    return grouped
 
-    print("\n=======================================================")
-    print("[SUCCESS] 정당별 법안 전체 순위표 생성 완료!")
-    print(" → 저장 위치:", OUTPUT_CSV)
-    print(" → 총 (정당 × 법안) 조합:", len(grouped))
-    print("=======================================================\n")
+
+if __name__ == "__main__":
+    raise SystemExit("이 스크립트는 build_party_bill_ranking(tables) 함수로 호출하세요.")

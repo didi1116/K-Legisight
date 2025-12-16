@@ -1,171 +1,141 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-build_party_member_ranking.py
-----------------------------------------------------------
-📌 목적:
-정당별 의원 협력도 랭킹을 계산하여 CSV로 출력한다.
+정당별 의원 협력도 랭킹 계산기.
 
-이 스크립트는 정당 내부에서 어떤 의원이 협력적인지/비협력적인지를
-안정적으로 비교하기 위해 '베이시안 보정된 협력 점수'를 사용한다.
-
-⚡ 제공되는 주요 기능:
-1) 정당별로 소속된 의원들의 발언을 집계
-2) 의원별 avg_score_prob (기본 평균 협력도) 계산
-3) 발언 수 부족으로 생기는 왜곡을 방지하기 위해 Bayesian Score 부여
-4) original_stance (절대평가), adjusted_stance (베이시안 기반) 제공
-5) 정당 내부 협력 순위(rank_total, 1등=가장 협력적) 제공
-6) UI에서 필터링을 위해 모든 의원을 정당별 정렬하여 출력
-
-📌 입력:
-    ./output_party/all_party.pkl
-    (b_load_party_data.py 에서 생성된 정당 매칭 + sentiment 처리 완료된 데이터)
-
-📌 출력:
-    ./output_party/party_member_ranking.csv
-
+이전 버전은 all_party.pkl을 읽어 CSV를 저장했지만,
+지금은 Supabase 테이블(dimension, parties, speeches) 형태의 dict를 받아
+DataFrame만 반환한다.
 """
 
-import os
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
 
-INPUT_PICKLE = "./output_party/all_party.pkl"
-OUTPUT_CSV = "./output_party/party_member_ranking.csv"
+
+def _safe_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        cleaned = val.strip().replace('"', "")
+        if cleaned.startswith("="):
+            cleaned = cleaned.lstrip("=")
+        try:
+            return float(cleaned)
+        except Exception:
+            return None
+    return None
 
 
-# ---------------------------------------------------------
-# 1) 절대평가 스탠스(original_stance)
-# ---------------------------------------------------------
-def get_original_stance(score):
-    """
-    순수 avg_score_prob만을 기준으로 스탠스를 부여한다.
-    일반적인 절대평가로,
-      +0.05 이상 → 협력
-      -0.05 이하 → 비협력
-      그 사이 → 중립
-    """
+def _safe_int(val: Any) -> Optional[int]:
+    try:
+        return int(val)
+    except Exception:
+        try:
+            return int(float(val))
+        except Exception:
+            return None
+
+
+def get_original_stance(score: float) -> str:
     if score >= 0.05:
         return "협력"
-    elif score <= -0.05:
+    if score <= -0.05:
         return "비협력"
     return "중립"
 
 
-# ---------------------------------------------------------
-# 2) 스탠스(adjusted_stance) — 베이시안 점수 기반
-# ---------------------------------------------------------
-def get_adjusted_stance(score):
-    """
-    Bayesian score를 기준으로 정당 내부 분위기까지 반영한 스탠스.
-      +0.03 이상 → 협력
-      -0.03 이하 → 비협력
-      그 사이 → 중립
-    """
+def get_adjusted_stance(score: float) -> str:
     if score >= 0.03:
         return "협력"
-    elif score <= -0.03:
+    if score <= -0.03:
         return "비협력"
     return "중립"
 
 
-# ---------------------------------------------------------
-# 3) 베이시안 스코어 계산 함수
-# ---------------------------------------------------------
-def bayesian_adjust(avg, n, global_mean, alpha=30):
-    """
-    베이시안 보정 공식:
-        score = (alpha * global_mean + n * avg) / (alpha + n)
-
-    - avg : 의원의 평균 협력 점수
-    - n   : 의원의 발언 수
-    - global_mean : 전체 의원 평균 협력 점수
-    - alpha : 발언 수 보정용 사전 신뢰도 (높을수록 global_mean에 가까워짐)
-    """
+def bayesian_adjust(avg: float, n: float, global_mean: float, alpha: int = 30) -> float:
     return (alpha * global_mean + n * avg) / (alpha + n)
 
 
+def build_party_member_ranking(tables: Dict[str, List[Dict[str, Any]]]) -> pd.DataFrame:
+    """
+    tables: {"dimension": [...], "parties": [...], "speeches": [...]}
+    반환: party_member_ranking DataFrame
+    """
+    speeches = pd.DataFrame(tables.get("speeches") or [])
+    if speeches.empty:
+        raise ValueError("speeches 테이블이 비어 있습니다.")
 
-# ---------------------------------------------------------
-# 메인 실행
-# ---------------------------------------------------------
-if __name__ == "__main__":
+    dimension = pd.DataFrame(tables.get("dimension") or [])
+    parties = pd.DataFrame(tables.get("parties") or [])
+    if dimension.empty:
+        raise ValueError("dimension 테이블이 필요합니다.")
 
-    print("[INFO] all_party.pkl 로드 중...")
-    if not os.path.exists(INPUT_PICKLE):
-        raise FileNotFoundError(f"[ERROR] {INPUT_PICKLE} 없음")
+    party_lookup = {}
+    if not parties.empty:
+        parties = parties.rename(columns={"name": "party_name"})
+        parties["party_id"] = parties["party_id"].apply(_safe_int)
+        party_lookup = parties.set_index("party_id")["party_name"].to_dict()
 
-    df = pd.read_pickle(INPUT_PICKLE)
+    name_col = "member_name" if "member_name" in dimension.columns else "name"
+    members = dimension[["member_id", name_col, "party_id", "party"]].copy()
+    members = members.rename(columns={"party": "party_name", name_col: "member_name"})
+    members["party_id"] = members["party_id"].apply(_safe_int)
+    members["party_name"] = members["party_name"].fillna(
+        members["party_id"].map(party_lookup)
+    )
 
-    # 정당 정보 없는 사람 제외
-    df = df[df["party_name"].notna()].copy()
-
-    # -----------------------------------------------------
-    # 1) 의원 단위 집계
-    # -----------------------------------------------------
-    print("[INFO] 의원 단위 통계 계산 중...")
+    speeches = speeches.merge(members, on="member_id", how="left")
+    # 병합 시 member_name 중복 열 정리
+    if "member_name_x" in speeches.columns and "member_name_y" in speeches.columns:
+        speeches["member_name"] = speeches["member_name_x"].fillna(speeches["member_name_y"])
+    elif "member_name_x" in speeches.columns:
+        speeches = speeches.rename(columns={"member_name_x": "member_name"})
+    elif "member_name_y" in speeches.columns:
+        speeches = speeches.rename(columns={"member_name_y": "member_name"})
+    speeches["prob_coop"] = speeches["prob_coop"].apply(_safe_float)
+    speeches["prob_noncoop"] = speeches["prob_noncoop"].apply(_safe_float)
+    speeches = speeches.dropna(subset=["party_id", "prob_coop", "prob_noncoop"])
+    speeches["score_prob"] = speeches["prob_coop"] - speeches["prob_noncoop"]
 
     member_stats = (
-        df.groupby(["party_name", "member_id", "member_name"])
+        speeches.groupby(["party_id", "party_name", "member_id", "member_name"], as_index=False)
         .agg(
             n_speeches=("speech_id", "count"),
             avg_score_prob=("score_prob", "mean"),
         )
-        .reset_index()
     )
 
-    # 전체 데이터 평균 (베이시안 global mean)
+    if member_stats.empty:
+        raise ValueError("의원 통계가 비어 있습니다.")
+
     global_mean = member_stats["avg_score_prob"].mean()
-
-
-    # -----------------------------------------------------
-    # 2) 베이시안 스코어 계산
-    # -----------------------------------------------------
-    print("[INFO] 베이시안 스코어 계산 중...")
 
     member_stats["bayesian_score"] = member_stats.apply(
         lambda r: bayesian_adjust(
             r["avg_score_prob"],
             r["n_speeches"],
             global_mean,
-            alpha=30
+            alpha=30,
         ),
-        axis=1
+        axis=1,
     )
-
-
-    # -----------------------------------------------------
-    # 3) 스탠스 생성
-    # -----------------------------------------------------
-    print("[INFO] 스탠스 부여 중...")
 
     member_stats["original_stance"] = member_stats["avg_score_prob"].apply(get_original_stance)
     member_stats["adjusted_stance"] = member_stats["bayesian_score"].apply(get_adjusted_stance)
 
-
-    # -----------------------------------------------------
-    # 4) 정당 내부 랭킹 생성
-    # -----------------------------------------------------
-    print("[INFO] 정당 내부 랭킹 계산 중...")
-
     member_stats["rank_total"] = (
-        member_stats
-        .sort_values(["party_name", "bayesian_score"], ascending=False)
+        member_stats.sort_values(["party_name", "bayesian_score"], ascending=False)
         .groupby("party_name")
         .cumcount() + 1
     )
 
-
-    # -----------------------------------------------------
-    # 5) 정렬 후 CSV 저장
-    # -----------------------------------------------------
     member_stats = member_stats.sort_values(["party_name", "rank_total"])
+    return member_stats
 
-    os.makedirs("./output_party", exist_ok=True)
-    member_stats.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
 
-    print("=======================================================")
-    print("[SUCCESS] 정당별 의원 협력도 랭킹 생성 완료!")
-    print(" → 저장 위치:", OUTPUT_CSV)
-    print(" → 총 의원 수:", len(member_stats))
-    print("=======================================================")
+if __name__ == "__main__":
+    raise SystemExit("build_party_member_ranking(tables) 함수를 사용하세요.")

@@ -13,7 +13,8 @@ pycache/
 환경 변수 파일
 /data/
 .env
-
+/backend/FastAPI/.env
+/backend/FastAPI/output_committee/
 VSCode 설정
 
 .vscode/
