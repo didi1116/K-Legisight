@@ -65,24 +65,51 @@ def build_party_member_ranking(tables: Dict[str, List[Dict[str, Any]]]) -> pd.Da
     dim = tables.get("dimension", [])
     dim_df = pd.DataFrame(dim) if dim else pd.DataFrame()
 
-    # map member_id -> party_name
-    if not dim_df.empty and "member_id" in dim_df.columns and "party" in dim_df.columns:
-        party_map = dict(zip(dim_df["member_id"], dim_df["party"]))
-    else:
-        party_map = {}
+    # Build robust maps for party and name (support different column names and types)
+    party_map = {}
+    name_map_raw = {}
+    name_map_str = {}
+    if not dim_df.empty and "member_id" in dim_df.columns:
+        # party mapping - try several party column names
+        party_col = None
+        for cand in ["party", "party_name"]:
+            if cand in dim_df.columns:
+                party_col = cand
+                break
+        if party_col:
+            for mid, p in zip(dim_df["member_id"], dim_df[party_col]):
+                party_map[mid] = p
+                try:
+                    party_map[str(mid)] = p
+                except Exception:
+                    pass
 
-    # map member_id -> member_name (if available)
-    name_map = {}
-    if not dim_df.empty:
-        if "member_id" in dim_df.columns and "name" in dim_df.columns:
-            name_map = dict(zip(dim_df["member_id"], dim_df["name"]))
-        elif "member_id" in dim_df.columns and "member_name" in dim_df.columns:
-            name_map = dict(zip(dim_df["member_id"], dim_df["member_name"]))
+        # name mapping - try common name columns
+        name_col = None
+        for cand in ["name", "member_name", "member_nm", "full_name", "이름"]:
+            if cand in dim_df.columns:
+                name_col = cand
+                break
+        if name_col:
+            for mid, nm in zip(dim_df["member_id"], dim_df[name_col]):
+                name_map_raw[mid] = nm
+                try:
+                    name_map_str[str(mid)] = nm
+                except Exception:
+                    pass
 
-    # attach party and name
-    speeches_df["party_name"] = speeches_df["member_id"].map(party_map)
-    speeches_df["member_name"] = speeches_df["member_id"].map(name_map)
+    # attach party and name using robust lookup (try raw, then str)
+    speeches_df["party_name"] = speeches_df["member_id"].map(lambda x: party_map.get(x) or party_map.get(str(x)))
 
+    def _resolve_member_name(mid):
+        if mid in name_map_raw:
+            return name_map_raw[mid]
+        s = str(mid)
+        if s in name_map_str:
+            return name_map_str[s]
+        return None
+
+    speeches_df["member_name"] = speeches_df["member_id"].apply(_resolve_member_name)
     # fallback: if no member_name, use member_id as string
     speeches_df["member_name"] = speeches_df["member_name"].fillna(speeches_df["member_id"].astype(str))
 

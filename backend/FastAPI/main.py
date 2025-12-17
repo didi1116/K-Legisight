@@ -109,7 +109,7 @@ def get_committee_maps():
     for row in rows:
         # 컬럼 이름이 committee_id 인지 id 인지 둘 다 체크
         c_id = row.get("committee_id") or row.get("id")
-        name = row.get("name")
+        name = row.get("committee")
 
         if c_id is None or not name:
             continue
@@ -482,6 +482,12 @@ def get_party_summary(party_id: int):
         # filter by party_name (member_rank uses 'party_name')
         party_members = member_rank[member_rank.get("party_name") == party_name]
 
+        # ensure member_id is clean and analyzed_members is number of unique members
+        try:
+            party_members["member_id"] = party_members["member_id"].apply(lambda x: int(x) if pd.notna(pd.to_numeric(x, errors='coerce')) else x)
+        except Exception:
+            pass
+
         member_top5 = (
             party_members.sort_values("bayesian_score", ascending=False)
             .head(5)
@@ -495,6 +501,12 @@ def get_party_summary(party_id: int):
             .to_dict(orient="records")
         )
 
+        # analyzed_members: verify using unique member_id count
+        try:
+            analyzed_members_count = int(party_members["member_id"].nunique())
+        except Exception:
+            analyzed_members_count = len(party_members)
+
         # 3) 정당별 법안 협력도 랭킹
         bill_rank = build_party_bill_ranking(tables)
         party_bills = bill_rank[bill_rank.get("party_name") == party_name]
@@ -506,6 +518,17 @@ def get_party_summary(party_id: int):
                 party_bills["bill_id"] = party_bills["bill_number"]
             if "bill_name" not in party_bills.columns and "bill_name" in party_bills.columns:
                 party_bills["bill_name"] = party_bills["bill_name"]
+
+            # try to fill missing bill_name from tables['bills'] mapping if available
+            bills_tbl = tables.get("bills") or []
+            if bills_tbl:
+                bills_map = {str(b.get("bill_id")): b.get("bill_name") for b in bills_tbl}
+                if "bill_name" not in party_bills.columns:
+                    party_bills["bill_name"] = party_bills["bill_id"].astype(str).map(bills_map)
+                else:
+                    party_bills["bill_name"] = party_bills["bill_name"].fillna(party_bills["bill_id"].astype(str).map(bills_map))
+                # final fallback: use bill_id as name
+                party_bills["bill_name"] = party_bills["bill_name"].fillna(party_bills["bill_id"].astype(str))
 
         bill_top5 = (
             party_bills.sort_values("bayesian_score", ascending=False)
@@ -1197,7 +1220,7 @@ def get_member_bill_stats_api(member_id: int):
         print(f"Error calculating bill stats for member {member_id}:", e)
         raise HTTPException(status_code=500, detail=str(e))
     
-# [추가] 특정 의원의 상세 정보(기본정보 + 상임위/정당 이력) 조회 API
+# [추가] 특정 의원의 상세 정보(기본정보 + 상임위/정당 이력 + 대표 발의 법안) 조회 API
 @app.get("/api/legislators/{member_id}/detail")
 def get_legislator_detail(member_id: int):
 
@@ -1258,7 +1281,7 @@ def get_legislator_detail(member_id: int):
             bills_res = (
                 supabase.table("bills")
                 .select("*")
-                .eq("proposer_name", member_name)  # 대표 발의자 이름 매칭
+                .ilike("proposer_name", f"%{member_name}%")  # 대표 발의자 이름 매칭
                 .order("proposer_date", desc=True) # 최신순 정렬
                 .execute()
             )
@@ -1284,6 +1307,7 @@ def get_legislator_detail(member_id: int):
                 "committees": committee_history,
                 "parties": party_history
             },
+            "representative_bills_count": len(representative_bills), # [추가] 대표 발의 법안 수
             "representative_bills": representative_bills, # [추가] 조회된 법안 리스트
             "message": "성공적으로 조회되었습니다."
         }
@@ -1334,7 +1358,7 @@ def get_member_bill_speeches_detail(member_id: int, bill_id: str):
         try:
             bill_res = (
                 supabase.table("bills")
-                .select("bill_name")
+                .select("*")
                 .eq("bill_id", bill_id)
                 .execute()
             )
@@ -1363,40 +1387,90 @@ def get_member_bill_speeches_detail(member_id: int, bill_id: str):
                 "message": "해당 의원의 발언 데이터가 없습니다."
             }
 
-        # 3. Python 레벨에서 bill_id 포함 여부 필터링
+        # 3. Python 레벨에서 bill_id 포함 여부 필터링 (더 견고한 파싱)
         # ---------------------------------------------------------
+        import re
         filtered_speeches = []
-        
-        for row in rows:
-            # 컬럼명이 bill_numbers, bill_review, bills 중 하나일 수 있음
-            bill_col_val = row.get("bill_numbers") or row.get("bill_review") or row.get("bills")
-            
-            # 리스트 파싱 (문자열 "['210001']" -> 리스트 ['210001'])
-            bills_list = []
-            if isinstance(bill_col_val, list):
-                bills_list = [str(b) for b in bill_col_val]
-            elif isinstance(bill_col_val, str):
-                try:
-                    # 리스트 형태 문자열 파싱 시도
-                    if bill_col_val.strip().startswith("["):
-                        parsed = ast.literal_eval(bill_col_val)
+
+        target_bid = str(bill_id).strip()
+        # allow numeric comparison if both sides are digits
+        try:
+            target_bid_int = int(target_bid)
+        except Exception:
+            target_bid_int = None
+
+        def _to_bill_list(val):
+            """Normalize various bill field formats into list of string ids."""
+            out = []
+            if val is None:
+                return out
+            # list -> stringify elements
+            if isinstance(val, list):
+                for b in val:
+                    if b is None:
+                        continue
+                    out.append(str(b).strip())
+                return out
+
+            # dict or other -> stringify
+            if isinstance(val, dict):
+                return [str(val)]
+
+            # string -> try literal_eval for list-like strings
+            if isinstance(val, str):
+                s = val.strip()
+                # common case: stringified python list
+                if s.startswith("[") and s.endswith("]"):
+                    try:
+                        parsed = ast.literal_eval(s)
                         if isinstance(parsed, list):
-                            bills_list = [str(b) for b in parsed]
-                        else:
-                            bills_list = [bill_col_val]
-                    else:
-                        # 단순 문자열이면 그대로 포함
-                        bills_list = [bill_col_val]
-                except:
-                    bills_list = [bill_col_val]
-            
-            # 해당 발언이 요청된 bill_id를 포함하고 있는지 확인
-            if str(bill_id) in bills_list:
+                            return [str(x).strip() for x in parsed if x is not None]
+                    except Exception:
+                        pass
+                # extract numeric tokens (e.g., '2107809', or '2107809,2107394')
+                nums = re.findall(r"\d+", s)
+                if nums:
+                    return [n.strip() for n in nums]
+                # fallback: comma-split
+                if "," in s:
+                    parts = [p.strip() for p in s.split(",") if p.strip()]
+                    return parts
+                # final fallback: return the raw string
+                return [s]
+
+            # anything else
+            return [str(val)]
+
+        for row in rows:
+            bill_col_val = row.get("bill_numbers") or row.get("bill_review") or row.get("bills")
+            bills_list = _to_bill_list(bill_col_val)
+
+            matched = False
+            # numeric compare when possible
+            if target_bid_int is not None:
+                for b in bills_list:
+                    try:
+                        if int(str(b).strip()) == target_bid_int:
+                            matched = True
+                            break
+                    except Exception:
+                        continue
+
+            if not matched:
+                # string comparison (normalized)
+                normalized = [str(x).strip() for x in bills_list]
+                if target_bid in normalized:
+                    matched = True
+
+            if matched:
                 filtered_speeches.append({
                     "speech_id": row.get("speech_id"),
-                    "date": row.get("speech_date") or row.get("date"), # 날짜 컬럼이 있다면 추가
+                    "date": row.get("speech_date") or row.get("date"),
                     "meeting_id": row.get("meeting_id"),
+                    "member_name": row.get("member_name"),
+                    "speech_length": row.get("speech_length"),
                     "speech_text": row.get("speech_text"),
+                    "bills": bills_list,
                     "sentiment": row.get("sentiment_label"),
                     "score": row.get("score_prob"),
                     "prob_coop": row.get("prob_coop"),
@@ -1472,15 +1546,6 @@ def get_dashboard_stats():
 @app.get("/")
 def read_root():
     return {"message": "K-LegiSight API is running!"}
-
-
-
-@app.get("/api/bills/")
-def get_bills():
-    response = supabase.table("bills").select("*").limit(100).execute()
-    return {"bills": response.data}
-
-
 
 
 
@@ -1671,7 +1736,7 @@ def get_committee_summary(committee_id: int):
         # 1. committee_total_score 에서 bayesian_score 조회
         score_res = (
             supabase.table("committee_total_score")
-            .select("committee, bayesian_score")
+            .select("committee, bayesian_score, adjusted_stance")
             .eq("committee", committee_name)
             .execute()
         )
@@ -1712,6 +1777,7 @@ def get_committee_summary(committee_id: int):
 
         return {
             "committee": committee_name,
+            "adjusted_stance": score_rows[0].get("adjusted_stance"),
             "committee_id": committee_id,
             "bayesian_score": bayesian_score,
             "members_top5": members_top5,

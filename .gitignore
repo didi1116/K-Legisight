@@ -9,6 +9,8 @@ pycache/
 *.pyc
 *.pyo
 *.pyd
+*.zip
+__pycache__/
 
 환경 변수 파일
 /data/
