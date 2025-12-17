@@ -1,109 +1,133 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-정당별 총 협력도 점수를 계산하는 유틸리티.
+build_party_total_score.py
+----------------------------------------------------------
+📌 목적:
+Supabase 데이터로부터 정당별 발언 협력도 점수를 계산하고,
+다음 3가지를 모두 산출한다:
 
-이전 버전은 all_party.pkl을 읽어 CSV로 저장했지만,
-지금은 Supabase 테이블(dimension, parties, speeches) 형태의 dict를 받아
-DataFrame으로 계산한 결과만 반환한다.
+  1) original_stance  → 절대평가 기반
+  2) adjusted_stance  → baseline 상대평가 기반
+  3) adjusted_score_prob → baseline 중심으로 정규화된 점수
+
+⚠ 중요:
+이 모듈은 FastAPI에서 tables dict (Supabase 데이터)를 받아
+party_total_score DataFrame을 반환하는 함수를 제공한다.
 """
 
-from __future__ import annotations
-
-from typing import Any, Dict, List, Optional
-
+from typing import Dict, List, Any
 import pandas as pd
 
 
-def _safe_float(val: Any) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, str):
-        cleaned = val.strip().replace('"', "")
-        if cleaned.startswith("="):
-            cleaned = cleaned.lstrip("=")
-        try:
-            return float(cleaned)
-        except Exception:
-            return None
-    return None
-
-
-def _safe_int(val: Any) -> Optional[int]:
-    try:
-        return int(val)
-    except Exception:
-        try:
-            return int(float(val))
-        except Exception:
-            return None
-
-
+# ---------------------------------------------------------
+# ✔ 절대평가 기반 스탠스(original)
+# ---------------------------------------------------------
 def get_original_stance(score: float) -> str:
+    """
+    score_prob 절대값만으로 협력/중립/비협력을 판단한다.
+
+      score >=  0.05 → 협력
+      score <= -0.05 → 비협력
+      그 사이는     → 중립
+
+    * UI에서 기준을 바꿔도 코드만 수정하면 됨.
+    """
     if score >= 0.05:
         return "협력"
-    if score <= -0.05:
+    elif score <= -0.05:
         return "비협력"
-    return "중립"
+    else:
+        return "중립"
 
 
+# ---------------------------------------------------------
+# ✔ 상대평가 기반 스탠스(adjusted)
+# ---------------------------------------------------------
 def get_adjusted_stance(avg: float, cut_up: float, cut_down: float) -> str:
+    """
+    baseline(정당 평균의 평균)을 중심으로,
+    ±0.025 범위 기준으로 스탠스를 분류한다.
+    """
     if avg >= cut_up:
         return "협력"
-    if avg <= cut_down:
+    elif avg <= cut_down:
         return "비협력"
-    return "중립"
+    else:
+        return "중립"
 
 
+# ---------------------------------------------------------
+# 핵심 함수: Supabase 데이터로부터 party_total_score 계산
+# ---------------------------------------------------------
 def build_party_total_score(tables: Dict[str, List[Dict[str, Any]]]) -> pd.DataFrame:
     """
-    tables: {"dimension": [...], "parties": [...], "speeches": [...]}
-    반환: party_total_score DataFrame
+    Supabase 테이블 데이터로부터 정당별 협력도 점수를 계산한다.
+
+    입력:
+        tables: {
+            'speeches': [{'member_id': ..., 'score_prob': ..., ...}, ...],
+            'dimension': [{'party': ..., 'member_id': ..., ...}, ...],
+            ...
+        }
+
+    반환:
+        DataFrame with columns:
+            party_name, total_speeches, total_score, avg_score_prob, 
+            n_members, baseline_score, cut_coop, cut_noncoop,
+            original_stance, adjusted_stance, adjusted_score_prob
     """
-    speeches = pd.DataFrame(tables.get("speeches") or [])
-    if speeches.empty:
-        raise ValueError("speeches 테이블이 비어 있습니다.")
 
-    dimension = pd.DataFrame(tables.get("dimension") or [])
-    parties = pd.DataFrame(tables.get("parties") or [])
+    # 1) speeches 테이블에서 필요한 데이터 추출
+    speeches = tables.get("speeches", [])
+    if not speeches:
+        raise ValueError("speeches table is empty or missing")
 
-    if dimension.empty:
-        raise ValueError("dimension 테이블이 필요합니다.")
+    speeches_df = pd.DataFrame(speeches)
 
-    party_lookup = {}
-    if not parties.empty:
-        parties = parties.rename(columns={"name": "party_name"})
-        parties["party_id"] = parties["party_id"].apply(_safe_int)
-        party_lookup = parties.set_index("party_id")["party_name"].to_dict()
+    # score_prob이 문자열인 경우 변환
+    if "score_prob" in speeches_df.columns:
+        speeches_df["score_prob"] = pd.to_numeric(speeches_df["score_prob"], errors="coerce").fillna(0.0)
+    else:
+        speeches_df["score_prob"] = 0.0
 
-    members = dimension[["member_id", "party_id", "party"]].copy()
-    members = members.rename(columns={"party": "party_name"})
-    members["party_id"] = members["party_id"].apply(_safe_int)
-    members["party_name"] = members["party_name"].fillna(
-        members["party_id"].map(party_lookup)
-    )
+    # member_id 확인
+    if "member_id" not in speeches_df.columns:
+        raise ValueError("speeches table must contain 'member_id' column")
 
-    speeches = speeches.merge(members, on="member_id", how="left")
-    speeches["prob_coop"] = speeches["prob_coop"].apply(_safe_float)
-    speeches["prob_noncoop"] = speeches["prob_noncoop"].apply(_safe_float)
-    speeches = speeches.dropna(subset=["party_id", "prob_coop", "prob_noncoop"])
+    # 2) dimension 테이블에서 party 정보 추출
+    dimension = tables.get("dimension", [])
+    if dimension:
+        dim_df = pd.DataFrame(dimension)
+        # member_id와 party를 매핑
+        if "member_id" in dim_df.columns and "party" in dim_df.columns:
+            party_map = dict(zip(dim_df["member_id"], dim_df["party"]))
+        else:
+            party_map = {}
+    else:
+        party_map = {}
 
-    speeches["score_prob"] = speeches["prob_coop"] - speeches["prob_noncoop"]
+    # 3) speeches_df에 party 추가
+    speeches_df["party_name"] = speeches_df["member_id"].map(party_map)
 
+    # 4) party_name이 있는 행만 유지
+    speeches_df = speeches_df[speeches_df["party_name"].notna()].copy()
+
+    if speeches_df.empty:
+        raise ValueError("No speeches with party information found")
+
+    # 5) 정당별 기본 통계 계산 (최적화됨)
     stats = (
-        speeches.groupby(["party_id", "party_name"], as_index=False)
-        .agg(
-            total_speeches=("speech_id", "count"),
+        speeches_df.groupby("party_name", as_index=False).agg(
+            total_speeches=("member_id", "count"),
             total_score=("score_prob", "sum"),
             avg_score_prob=("score_prob", "mean"),
-            n_members=("member_id", lambda x: x.nunique()),
+            n_members=("member_id", "nunique")
         )
     )
 
-    if stats.empty:
-        raise ValueError("정당별 통계가 비어 있습니다.")
-
+    # 6) baseline 계산 및 절단점 생성
     baseline = stats["avg_score_prob"].mean()
     cut_coop = baseline + 0.025
     cut_noncoop = baseline - 0.025
@@ -111,14 +135,25 @@ def build_party_total_score(tables: Dict[str, List[Dict[str, Any]]]) -> pd.DataF
     stats["baseline_score"] = baseline
     stats["cut_coop"] = cut_coop
     stats["cut_noncoop"] = cut_noncoop
+
+    # 7) original_stance 계산 (절대평가)
     stats["original_stance"] = stats["avg_score_prob"].apply(get_original_stance)
-    stats["adjusted_stance"] = stats["avg_score_prob"].apply(
-        lambda x: get_adjusted_stance(x, cut_coop, cut_noncoop)
+
+    # 8) adjusted_stance 계산 (상대평가)
+    stats["adjusted_stance"] = stats.apply(
+        lambda row: get_adjusted_stance(row["avg_score_prob"], cut_coop, cut_noncoop),
+        axis=1
     )
+
+    # 9) adjusted_score_prob 추가 (baseline 기준 보정 점수)
     stats["adjusted_score_prob"] = stats["avg_score_prob"] - baseline
 
+    # NaN을 None으로 변환 (JSON 직렬화 가능하게)
+    for col in stats.columns:
+        if stats[col].dtype == 'object':
+            stats[col] = stats[col].where(pd.notna(stats[col]), None)
+        else:
+            # numeric 컬럼: NaN을 None으로 변환
+            stats[col] = stats[col].apply(lambda x: None if (isinstance(x, float) and pd.isna(x)) else x)
+
     return stats
-
-
-if __name__ == "__main__":
-    raise SystemExit("build_party_total_score(tables) 함수를 사용하세요.")

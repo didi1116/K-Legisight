@@ -15,6 +15,10 @@ pycache/
 .env
 /backend/FastAPI/.env
 /backend/FastAPI/output_committee/
+/backend/FastAPI/output_party/
+/backend/FastAPI/data/
+/backend/FastAPI/model_ai_learn/
+/backend/FastAPI/output_bill/
 VSCode 설정
 
 .vscode/

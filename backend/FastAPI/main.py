@@ -2,7 +2,7 @@
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Dict, Any, Optional
 import schemas 
 from database import supabase 
 import random 
@@ -14,7 +14,9 @@ from build_party_member_ranking import build_party_member_ranking
 from build_party_bill_ranking import build_party_bill_ranking
 from sqlalchemy.orm import Session
 from util_common import compute_score_prob, compute_speech_length
+from predict_bill_pass_probability import predict_bill_pass_probability
 import ast
+from pydantic import BaseModel
 
 TABLE_PREVIEW_NAMES = [
     "bills",
@@ -28,6 +30,35 @@ TABLE_PREVIEW_NAMES = [
     "parties_history",
     "speeches",
 ]
+
+
+# ======================================================================
+# PYDANTIC SCHEMAS FOR BILL PREDICTION
+# ======================================================================
+class BillKeywordInput(BaseModel):
+    """사용자 입력 법안 키워드"""
+    keyword: str
+
+
+class BillEvidenceOutput(BaseModel):
+    """근거 법안"""
+    bill_number: str
+    bill_name: str
+    avg_score_prob: float
+    n_speeches: int
+    label: int
+    similarity: float
+    stance: str
+
+
+class BillPredictionOutput(BaseModel):
+    """법안 통과 가능성 예측 결과"""
+    query: str
+    predicted_pass_probability: Optional[float]
+    legislative_gap: Optional[Dict[str, Any]]
+    confidence: Optional[Dict[str, Any]]
+    explanation: str
+    evidence_bills: List[BillEvidenceOutput]
 
 
 @asynccontextmanager
@@ -179,12 +210,111 @@ def _fetch_table(table_name: str):
     return res.data or []
 
 
+def _fetch_table_paginated(table_name: str, select_cols: str = "*", batch_size: int = 1000, max_batches: int = None):
+    """
+    Supabase에서 1000개 행씩 페이지네이션하여 데이터를 가져온다.
+    
+    Args:
+        table_name: 테이블 이름
+        select_cols: 선택할 컬럼 (쉼표로 구분, 기본값 "*")
+        batch_size: 한 번에 가져올 행 수 (최대 1000)
+        max_batches: 최대 배치 수 (None이면 모두 가져옴)
+    
+    Returns:
+        모든 행을 합친 리스트
+    """
+    all_data = []
+    batch_count = 0
+    offset = 0
+    
+    while True:
+        batch_count += 1
+        if max_batches and batch_count > max_batches:
+            break
+        
+        try:
+            res = (
+                supabase.table(table_name)
+                .select(select_cols)
+                .range(offset, offset + batch_size - 1)
+                .execute()
+            )
+            batch_data = res.data or []
+            
+            if not batch_data:
+                break  # 더 이상 데이터 없음
+            
+            all_data.extend(batch_data)
+            offset += batch_size
+            
+            print(f"[INFO] {table_name}: 배치 {batch_count} 로드 완료 ({len(batch_data)} 행, 누적: {len(all_data)} 행)")
+            
+        except Exception as e:
+            print(f"[WARN] {table_name} 배치 {batch_count} 로드 실패: {e}")
+            break
+    
+    return all_data
+
+
 def _load_party_tables():
-    """Supabase에서 필요한 테이블을 모두 불러 dict로 반환."""
-    table_names = ["dimension", "parties", "speeches", "member_bill_stats", "bills"]
+    """
+    정당 분석용 Supabase 테이블을 효율적으로 로드.
+    
+    - dimension: 필요한 컬럼만 선택 (member_id, party)
+    - parties: 전체 (작은 테이블)
+    - speeches: 필요한 컬럼만 선택 (member_id, score_prob, speech_id)
+    - member_bill_stats: 전체 (중간 테이블)
+    - bills: 필요한 컬럼만 선택 (bill_id, bill_name)
+    """
     tables = {}
-    for name in table_names:
-        tables[name] = _fetch_table(name)
+    
+    # 1. dimension: member_id, party만 필요
+    try:
+        tables["dimension"] = _fetch_table_paginated(
+            "dimension",
+            select_cols="member_id, party",
+            max_batches=None
+        )
+        print(f"[SUCCESS] dimension 로드: {len(tables['dimension'])} 행")
+    except Exception as e:
+        print(f"[ERROR] dimension 로드 실패: {e}")
+        tables["dimension"] = []
+    
+    # 2. parties: 작은 테이블이므로 전체 로드
+    try:
+        tables["parties"] = _fetch_table("parties")
+        print(f"[SUCCESS] parties 로드: {len(tables['parties'])} 행")
+    except Exception as e:
+        print(f"[ERROR] parties 로드 실패: {e}")
+        tables["parties"] = []
+    
+    # 3. speeches: 필요한 컬럼만 선택 (member_id, score_prob, speech_id)
+    try:
+        tables["speeches"] = _fetch_table_paginated(
+            "speeches",
+            select_cols="member_id, score_prob, speech_id",
+            max_batches=None
+        )
+        print(f"[SUCCESS] speeches 로드: {len(tables['speeches'])} 행")
+    except Exception as e:
+        print(f"[ERROR] speeches 로드 실패: {e}")
+        tables["speeches"] = []
+    
+    # 4. member_bill_stats: 필요한 컬럼만 선택
+    try:
+        tables["member_bill_stats"] = _fetch_table_paginated(
+            "member_bill_stats",
+            select_cols="member_id, bill_id, score_prob_mean, n_speeches, stance",
+            max_batches=None
+        )
+        print(f"[SUCCESS] member_bill_stats 로드: {len(tables['member_bill_stats'])} 행")
+    except Exception as e:
+        print(f"[ERROR] member_bill_stats 로드 실패: {e}")
+        tables["member_bill_stats"] = []
+    
+    # Note: we no longer fetch `speeches` or `bills` here. downstream
+    # ranking functions now use `member_bill_stats` and `dimension`.
+    
     return tables
 
 
@@ -294,20 +424,63 @@ def get_party_summary(party_id: int):
     try:
         tables = _load_party_tables()
 
-        # 1) 정당 총 협력도
+        # Ensure we have parties list to map id<->name
+        parties_list = tables.get("parties", []) or []
+        party_id_map = {}
+        party_name_map = {}
+        for p in parties_list:
+            pid = p.get("id") or p.get("party_id") or p.get("partyId")
+            pname = p.get("party_name") or p.get("name") or p.get("party")
+            if pid is not None and pname:
+                try:
+                    party_id_map[int(pid)] = pname
+                    party_name_map[pname] = int(pid)
+                except Exception:
+                    party_id_map[pid] = pname
+
+        # Try to get party_name from parties table; fallback to None
+        party_name = party_id_map.get(party_id)
+
+        # If speeches are needed by build functions, fetch on-demand
+        if not tables.get("speeches"):
+            try:
+                resp = (
+                    supabase.table("speeches").select("member_id, score_prob, speech_id, bill_numbers").execute()
+                )
+                tables["speeches"] = resp.data or []
+                print(f"[INFO] on-demand speeches 로드: {len(tables['speeches'])} 행")
+            except Exception as e:
+                print("[WARN] on-demand speeches 로드 실패:", e)
+                tables["speeches"] = []
+
+        # 1) 정당 총 협력도 (build_party_total_score expects 'speeches')
         party_total = build_party_total_score(tables)
-        party_total["party_id"] = party_total["party_id"].apply(_safe_int)
-        target_party = party_total[party_total["party_id"] == party_id]
+
+        # attach party_id to party_total if possible
+        if "party_name" in party_total.columns:
+            party_total["party_id"] = party_total["party_name"].map(party_name_map)
+
+        # find target party row
+        if party_name is not None:
+            target_party = party_total[party_total["party_name"] == party_name]
+        else:
+            # try matching by mapped party_id column
+            if "party_id" in party_total.columns:
+                target_party = party_total[party_total["party_id"] == party_id]
+            else:
+                target_party = pd.DataFrame()
+
         if target_party.empty:
             raise HTTPException(status_code=404, detail="정당을 찾을 수 없습니다.")
 
         party_row = target_party.iloc[0].to_dict()
-        party_name = party_row.get("party_name") or f"party-{party_id}"
+        # ensure party_name variable exists
+        party_name = party_row.get("party_name") or party_name or f"party-{party_id}"
 
         # 2) 정당별 의원 협력도 랭킹
         member_rank = build_party_member_ranking(tables)
-        member_rank["party_id"] = member_rank["party_id"].apply(_safe_int)
-        party_members = member_rank[member_rank["party_id"] == party_id]
+        # filter by party_name (member_rank uses 'party_name')
+        party_members = member_rank[member_rank.get("party_name") == party_name]
 
         member_top5 = (
             party_members.sort_values("bayesian_score", ascending=False)
@@ -324,19 +497,26 @@ def get_party_summary(party_id: int):
 
         # 3) 정당별 법안 협력도 랭킹
         bill_rank = build_party_bill_ranking(tables)
-        bill_rank["party_id"] = bill_rank["party_id"].apply(_safe_int)
-        party_bills = bill_rank[bill_rank["party_id"] == party_id]
+        party_bills = bill_rank[bill_rank.get("party_name") == party_name]
+
+        # Normalize bill columns to expected keys (bill_id) for compatibility
+        if not party_bills.empty:
+            party_bills = party_bills.copy()
+            if "bill_number" in party_bills.columns and "bill_id" not in party_bills.columns:
+                party_bills["bill_id"] = party_bills["bill_number"]
+            if "bill_name" not in party_bills.columns and "bill_name" in party_bills.columns:
+                party_bills["bill_name"] = party_bills["bill_name"]
 
         bill_top5 = (
             party_bills.sort_values("bayesian_score", ascending=False)
             .head(5)
-            .loc[:, ["bill_id", "bill_name", "speech_count", "avg_score_prob", "bayesian_score", "rank_in_party"]]
+            .loc[:, [c for c in ["bill_id", "bill_name", "speech_count", "avg_score_prob", "bayesian_score", "rank_in_party"] if c in party_bills.columns]]
             .to_dict(orient="records")
         )
         bill_bottom5 = (
             party_bills.sort_values("bayesian_score", ascending=True)
             .head(5)
-            .loc[:, ["bill_id", "bill_name", "speech_count", "avg_score_prob", "bayesian_score", "rank_in_party"]]
+            .loc[:, [c for c in ["bill_id", "bill_name", "speech_count", "avg_score_prob", "bayesian_score", "rank_in_party"] if c in party_bills.columns]]
             .to_dict(orient="records")
         )
 
@@ -361,7 +541,75 @@ def get_party_summary(party_id: int):
     except Exception as e:
         print("Error in get_party_summary:", e)
         raise HTTPException(status_code=500, detail="정당 분석 중 오류가 발생했습니다.")
+
+
+# ==========================================
+# 1-2. 정당별 총 협력도 점수 API
+# ==========================================
+@app.get("/api/parties/total-score")
+def get_parties_total_score():
+    """
+    모든 정당의 협력도 점수를 반환한다.
     
+    반환 항목:
+      - party_name: 정당명
+      - total_speeches: 총 발언 수
+      - total_score: 점수 총합
+      - avg_score_prob: 평균 협력도 점수 (-1 ~ 1)
+      - n_members: 소속 의원 수
+      - baseline_score: 전체 평균 협력도 (기준값)
+      - original_stance: 절대평가 스탠스 (협력/중립/비협력)
+      - adjusted_stance: 상대평가 스탠스 (baseline 기준)
+      - adjusted_score_prob: 보정된 협력도 점수 (baseline 중심)
+    """
+    try:
+        tables = _load_party_tables()
+        
+        # party_total_score 계산
+        party_scores = build_party_total_score(tables)
+        
+        # DataFrame을 list of dict로 변환
+        result = party_scores.to_dict(orient="records")
+        
+        return {
+            "count": len(result),
+            "parties": result
+        }
+    
+    except Exception as e:
+        print("Error in get_parties_total_score:", e)
+        raise HTTPException(status_code=500, detail=f"정당 협력도 계산 중 오류: {str(e)}")
+
+    
+@app.get("/api/parties/member-ranking")
+def get_parties_member_ranking():
+    """
+    모든 정당의 의원별 협력도(베이시안 보정 포함) 랭킹을 반환한다.
+    """
+    try:
+        tables = _load_party_tables()
+        df = build_party_member_ranking(tables)
+        result = df.to_dict(orient="records")
+        return {"count": len(result), "members": result}
+    except Exception as e:
+        print("Error in get_parties_member_ranking:", e)
+        raise HTTPException(status_code=500, detail=f"정당별 의원 랭킹 계산 중 오류: {str(e)}")
+
+
+@app.get("/api/parties/bill-ranking")
+def get_parties_bill_ranking():
+    """
+    모든 정당의 법안별 협력도 랭킹을 반환한다.
+    """
+    try:
+        tables = _load_party_tables()
+        df = build_party_bill_ranking(tables)
+        result = df.to_dict(orient="records")
+        return {"count": len(result), "bills": result}
+    except Exception as e:
+        print("Error in get_parties_bill_ranking:", e)
+        raise HTTPException(status_code=500, detail=f"정당별 법안 랭킹 계산 중 오류: {str(e)}")
+
 
 # ==========================================
 # 2. SEARCH API (ĐÃ SỬA LOGIC LOOKUP)
@@ -1476,3 +1724,59 @@ def get_committee_summary(committee_id: int):
     except Exception as e:
         print(f"Error in /api/committee-summary/{committee_name}:", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# 법안 통과 가능성 예측 API
+# ==========================================
+@app.post("/api/predict/bill-pass", response_model=BillPredictionOutput)
+def predict_bill_pass(data: BillKeywordInput):
+    """
+    📊 법안 키워드를 입력받아 통과 가능성을 예측하는 API
+    
+    입력:
+      - keyword: 법안 키워드 (예: "인공지능", "환경", "교육")
+    
+    반환:
+      - predicted_pass_probability: 가결 확률 (0 ~ 1)
+      - legislative_gap: 입법 괴리율 (score + level)
+      - confidence: 신뢰도 (score + level)
+      - explanation: 자연어 설명
+      - evidence_bills: 근거가 된 과거 법안 목록
+    """
+    try:
+        keyword = data.keyword.strip()
+        
+        if not keyword:
+            raise HTTPException(status_code=400, detail="법안 키워드를 입력해주세요.")
+        
+        print(f"[INFO] /api/predict/bill-pass 요청: keyword='{keyword}'")
+        
+        # predict_bill_pass_probability 함수 호출
+        result = predict_bill_pass_probability(keyword)
+        
+        # numpy 타입 변환 (JSON 직렬화 안전성)
+        if result.get("legislative_gap") and isinstance(result["legislative_gap"], dict):
+            if isinstance(result["legislative_gap"].get("score"), float):
+                result["legislative_gap"]["score"] = float(result["legislative_gap"]["score"])
+        
+        if result.get("confidence") and isinstance(result["confidence"], dict):
+            if isinstance(result["confidence"].get("score"), float):
+                result["confidence"]["score"] = float(result["confidence"]["score"])
+        
+        # evidence_bills 타입 변환
+        if result.get("evidence_bills"):
+            for eb in result["evidence_bills"]:
+                if "avg_score_prob" in eb:
+                    eb["avg_score_prob"] = float(eb["avg_score_prob"])
+                if "similarity" in eb:
+                    eb["similarity"] = float(eb["similarity"])
+        
+        return result
+    
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as e:
+        print(f"Error in /api/predict/bill-pass: {e}")
+        raise HTTPException(status_code=500, detail=f"법안 예측 중 오류: {str(e)}")
+
