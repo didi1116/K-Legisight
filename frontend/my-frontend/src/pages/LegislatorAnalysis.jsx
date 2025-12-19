@@ -16,6 +16,10 @@ export function LegislatorAnalysis() {
   // Kiểm tra xem có filter được gửi từ trang Dashboard sang không
   const incomingFilters = location.state?.incomingFilters;
 
+  // URL 쿼리 파라미터에서 member_id 추출 (통합 검색에서 넘어온 경우)
+  const urlSearchParams = new URLSearchParams(location.search);
+  const memberIdFromURL = urlSearchParams.get('member_id');
+
   // --- 1. STATE DỮ LIỆU ---
   const [allLegislators, setAllLegislators] = useState([]); 
   const [legislators, setLegislators] = useState([]); 
@@ -41,6 +45,9 @@ export function LegislatorAnalysis() {
     count: incomingFilters?.count || "all", 
     method: incomingFilters?.method || "all"
   });
+
+  // member_id로 필터링할 때 사용할 state
+  const [filterByMemberId, setFilterByMemberId] = useState(memberIdFromURL || null);
 
   // --- 4. LOAD DỮ LIỆU TỪ API ---
   useEffect(() => {
@@ -75,47 +82,92 @@ export function LegislatorAnalysis() {
   }, []); // Chỉ chạy 1 lần khi mount
 
   // --- 5. LOGIC LỌC DỮ LIỆU CHUNG (Dùng chung cho cả Auto và Manual) ---
-  const performFiltering = (criteria) => {
+  const performFiltering = (criteria, memberId = null) => {
     let result = [...allLegislators];
 
-    if (criteria.name) result = result.filter(l => l.name.includes(criteria.name));
-    if (criteria.party !== "all") result = result.filter(l => l.party === criteria.party);
-    if (criteria.city !== "all") result = result.filter(l => l.region && l.region.includes(criteria.city));
-    if (criteria.committee !== "all") result = result.filter(l => l.committee === criteria.committee);
-    if (criteria.gender !== "all") result = result.filter(l => l.gender === criteria.gender);
-    if (criteria.count !== "all") result = result.filter(l => l.count === criteria.count);
-    if (criteria.method !== "all") result = result.filter(l => l.method === criteria.method);
+    // 우선순위: member_id가 있으면 해당 의원만 표시
+    if (memberId) {
+      result = result.filter(l => String(l.member_id) === String(memberId) || String(l.id) === String(memberId));
+      setLegislators(result);
+      return;
+    }
+
+    // ============ 모든 필터 조건 동시에 적용 ============
     
-    // --- Đã mở comment để lọc Quận/Huyện ---
-    // (Đảm bảo trong data 'l' có trường 'district' hoặc 'region_detail' tương ứng)
-    if (criteria.district !== "all") {
-        result = result.filter(l => l.district === criteria.district); 
+    // 1. 이름 필터 (부분 일치)
+    if (criteria.name && criteria.name.trim() !== "") {
+      result = result.filter(l => l.name && l.name.includes(criteria.name));
     }
     
-    // --- Lọc Tuổi ---
-    // (Cần logic tùy thuộc vào data 'age' trong DB là số hay chuỗi)
-    if (criteria.age !== "all") {
-        // Ví dụ: l.age_range === criteria.age
-        // result = result.filter(l => l.age_range === criteria.age); 
+    // 2. 정당 필터
+    if (criteria.party && criteria.party !== "all") {
+      result = result.filter(l => l.party === criteria.party);
+    }
+    
+    // 3. 지역 필터 (시/도 - 정확 일치)
+    if (criteria.city && criteria.city !== "all") {
+      result = result.filter(l => l.city === criteria.city);
+    }
+    
+    // 4. 구/군 필터 (정확 일치)
+    if (criteria.district && criteria.district !== "all") {
+      result = result.filter(l => l.district === criteria.district);
+    }
+    
+    // 5. 위원회 필터
+    if (criteria.committee && criteria.committee !== "all") {
+      result = result.filter(l => l.committee === criteria.committee);
+    }
+    
+    // 6. 성별 필터
+    if (criteria.gender && criteria.gender !== "all") {
+      result = result.filter(l => l.gender === criteria.gender);
+    }
+    
+    // 7. 당선 횟수 필터 (초선, 재선, 3선 등)
+    if (criteria.count && criteria.count !== "all") {
+      result = result.filter(l => l.count === criteria.count);
+    }
+    
+    // 8. 선거 방법 필터 (지역구, 비례대표)
+    if (criteria.method && criteria.method !== "all") {
+      result = result.filter(l => l.method === criteria.method);
+    }
+    
+    // 9. 연령 필터 (u30, u40, u50, u60, u70, o70)
+    if (criteria.age && criteria.age !== "all") {
+      result = result.filter(l => l.age === criteria.age);
     }
 
     setLegislators(result);
   };
 
-  // --- 6. TỰ ĐỘNG LỌC KHI CÓ DỮ LIỆU TỪ DASHBOARD ---
+  // --- 6. TỰ ĐỘNG LỌC KHI CÓ DỮ LIỆU TỪ DASHBOARD 또는 URL member_id ---
   useEffect(() => {
-    // Chỉ chạy khi đã load xong data VÀ có filter gửi sang
-    if (!loading && allLegislators.length > 0 && incomingFilters) {
-       console.log("Auto applying filters:", incomingFilters);
-       performFiltering(incomingFilters);
-       
-       // Xóa state trong history để nếu F5 lại không bị lọc lại (tuỳ chọn, UX tốt hơn)
-       window.history.replaceState({}, document.title);
+    // 데이터 로딩이 완료되고 allLegislators가 있을 때만 실행
+    if (!loading && allLegislators.length > 0) {
+      
+      // 1순위: URL에서 member_id로 넘어온 경우 (통합 검색)
+      if (filterByMemberId) {
+        console.log("Auto filtering by member_id:", filterByMemberId);
+        performFiltering({}, filterByMemberId);
+        return;
+      }
+      
+      // 2순위: Dashboard에서 state로 넘어온 필터
+      if (incomingFilters) {
+        console.log("Auto applying filters:", incomingFilters);
+        performFiltering(incomingFilters);
+        
+        // Xóa state trong history để nếu F5 lại không bị lọc lại (tuỳ chọn, UX tốt hơn)
+        window.history.replaceState({}, document.title);
+      }
     }
-  }, [loading, allLegislators]); // Bỏ incomingFilters khỏi dep array để tránh loop, hoặc giữ nếu object ổn định
+  }, [loading, allLegislators, filterByMemberId]); // filterByMemberId 추가
 
   // --- 7. HÀM XỬ LÝ TÌM KIẾM (Nút bấm) ---
   const handleSearch = () => {
+    console.log("Searching with criteria:", searchParams);
     performFiltering(searchParams);
   };
 
@@ -133,6 +185,7 @@ export function LegislatorAnalysis() {
       count: "all", 
       method: "all"
     });
+    setFilterByMemberId(null); // member_id 필터도 초기화
     setLegislators(allLegislators);
   };
 

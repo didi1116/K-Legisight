@@ -77,8 +77,8 @@ export function LegislatorProfile({ profile }) {
 
         <div className="pt-4 mt-4 border-t border-slate-100">
           <div className="flex justify-between items-center">
-            <span className="text-slate-500 font-medium">분석 대상 법안</span>
-            <span className="text-lg font-bold text-blue-600">{profile.total_bills}건</span>
+            <span className="text-slate-500 font-medium">대표 발의 법안 수</span>
+            <span className="text-lg font-bold text-black-600">{profile.total_bills}건</span>
           </div>
         </div>
       </CardContent>

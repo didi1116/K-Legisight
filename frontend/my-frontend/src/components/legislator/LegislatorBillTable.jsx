@@ -113,10 +113,10 @@ export function LegislatorBillTable({ bills, onBillClick, showProposer = true })
                 </div>
         
 
-                {/* 점수 (0~100) */}
+                {/* 점수 소수점 n자리*/}
                 <div className="text-right pr-2 text-xs font-mono text-slate-700">
                   {typeof bill.scoreProbMean === "number"
-                    ? `${bill.scoreProbMean}`
+                    ? `${bill.scoreProbMean.toFixed(3)}`
                     : "-"}
                 </div>
               </div>

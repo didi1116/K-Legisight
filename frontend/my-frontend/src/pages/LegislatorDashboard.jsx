@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Download, Bot } from "lucide-react";
+import { ArrowLeft, Bot } from "lucide-react";
 
 import { LegislatorProfile } from '@/components/legislator/LegislatorProfile';
 import { LegislatorBillTable } from '@/components/legislator/LegislatorBillTable';
@@ -13,150 +13,156 @@ export function LegislatorDashboard() {
   const navigate = useNavigate();
   const location = useLocation();
   
+  // 데이터 수신
   const { memberProfile } = location.state || {};
 
-  const [profileData, setProfileData] = useState(memberProfile || null);
+  // 초기 상태를 null로 설정하여 API 응답 후에만 렌더링
+  const [profileData, setProfileData] = useState(null);
+  const [isLoadingProfile, setIsLoadingProfile] = useState(true);
   
-  // ---------------- STATE DỮ LIỆU ----------------
-  const [originalBills, setOriginalBills] = useState([]);
+  // ---------------- STATE ----------------
   const [bills, setBills] = useState([]);
+  const [originalBills, setOriginalBills] = useState([]);
   const [aiSummary, setAiSummary] = useState("");
 
-  // ---------------- STATE BỘ LỌC (Đã bổ sung đầy đủ) ----------------
+  // ---------------- FILTER STATE ----------------
   const [filterName, setFilterName] = useState("");
   const [filterBill, setFilterBill] = useState("");
-  
   const [selectedParty, setSelectedParty] = useState("all");
   const [selectedCity, setSelectedCity] = useState("all");
-  const [selectedDistrict, setSelectedDistrict] = useState("all"); // Mới
-  const [selectedCommittee, setSelectedCommittee] = useState("all"); // Mới
-  const [selectedGender, setSelectedGender] = useState("all"); // Mới
-  const [selectedAge, setSelectedAge] = useState("all"); // Mới
-  const [selectedCount, setSelectedCount] = useState("all"); // Mới
-  const [selectedMethod, setSelectedMethod] = useState("all"); // Mới
+  const [selectedDistrict, setSelectedDistrict] = useState("all");
+  const [selectedCommittee, setSelectedCommittee] = useState("all");
+  const [selectedGender, setSelectedGender] = useState("all");
+  const [selectedAge, setSelectedAge] = useState("all");
+  const [selectedCount, setSelectedCount] = useState("all");
+  const [selectedMethod, setSelectedMethod] = useState("all");
 
   const currentDistricts = DISTRICTS[selectedCity] || [];
 
-  const stats = {
-    coop: 0,
-    nonCoop: 0,
-    neutral: 0
-  };
-
+  // 통계 계산
+  const stats = { coop: 0, nonCoop: 0, neutral: 0 };
   if (bills && bills.length > 0) {
     bills.forEach(bill => {
-      // 1. Ưu tiên lấy text từ 'sentiment' (ví dụ: "협력")
-      // 2. Nếu không có, mới lấy từ 'score' (phòng trường hợp data thô của bạn để chữ ở đây)
       const sentimentVal = bill.sentiment || bill.score || "";
-      
-      if (sentimentVal === "협력") {
-        stats.coop += 1;
-      } else if (sentimentVal === "비협력") {
-        stats.nonCoop += 1;
-      } else {
-        // Các trường hợp còn lại (Trung lập, hoặc không xác định)
-        stats.neutral += 1;
-      }
+      if (sentimentVal === "협력") stats.coop += 1;
+      else if (sentimentVal === "비협력") stats.nonCoop += 1;
+      else stats.neutral += 1;
     });
   }
 
-  // ------------- 1. LOAD BILL DATA & DETAIL PROFILE -------------
+  // ------------- 1. LOAD DATA -------------
   useEffect(() => {
     if (!memberProfile) return;
 
-    // Ưu tiên member_id, fallback sang id (đề phòng trường hợp id khác tên)
     const memberId = memberProfile.member_id ?? memberProfile.id;
     
     if (!memberId) {
-      console.error("No member_id / id in memberProfile");
+      console.error("No member_id found");
       return;
     }
 
-    // 1. Hàm lấy danh sách Bill
+    // A. Fetch Bills
     const fetchBills = async () => {
       try {
         const res = await fetch(`http://localhost:8000/api/legislators/${memberId}/bills`);
-        if (!res.ok) throw new Error("Bills API error");
-        const data = await res.json();
-
-        setOriginalBills(data.bills || []);
-        setBills(data.bills || []); 
-        setAiSummary(data.ai_summary || "");
+        if (res.ok) {
+          const data = await res.json();
+          setOriginalBills(data.bills || []);
+          setBills(data.bills || []); 
+          setAiSummary(data.ai_summary || "");
+        }
       } catch (err) {
         console.error("Failed to load bills:", err);
       }
     };
 
-    // 2. Hàm lấy chi tiết Profile + Lịch sử Ủy ban (Code bạn vừa sửa)
+    // B. Fetch Detail
     const fetchDetail = async () => {
       try {
-        // Gọi API chi tiết
         const res = await fetch(`http://localhost:8000/api/legislators/${memberId}/detail`);
         
         if (res.ok) {
           const data = await res.json();
+          const backendProfile = data.profile || {};
           
-          // Format lại lịch sử ủy ban cho đúng chuẩn hiển thị
+          console.log("🔥 CHECK BACKEND DATA:", backendProfile); 
+
+          // 1. 당선횟수 포맷팅 (숫자 -> "N선")
+          let finalElectionCount = "초선";
+          const rawCount = backendProfile.elected_count;
+          if (rawCount) {
+             finalElectionCount = (typeof rawCount === 'number') ? `${rawCount}선` : rawCount;
+          }
+
+          // 2. 위원회 이력 포맷팅
           const formattedCommittees = data.history?.committees?.map(c => ({
              name: c.committee,       
              startDate: c.start_date, 
              endDate: c.end_date      
           })) || [];
 
-          // Cập nhật State: Giữ cái cũ (prev) + Ghi đè cái mới (data.profile)
-          setProfileData(prev => ({
-            ...prev,            
-            ...data.profile,    // <-- Dữ liệu khu vực, giới tính, ngày sinh nằm ở đây
-            type: 'person',     
-            committees: formattedCommittees 
-          }));
+          // 3. State 업데이트
+          setProfileData({
+              ...backendProfile, 
+              
+              // === [핵심] LegislatorProfile이 원하는 변수명으로 데이터 저장 ===
+              
+              // (0) member_id 추가 (필수!)
+              member_id: memberId,
+              
+              // (1) 지역구 -> region
+              region: backendProfile.district || "지역구 없음",
+
+              // (2) 당선횟수 -> count
+              count: finalElectionCount, 
+              // (혹시 몰라 백업용으로 다른 이름들도 저장)
+              election_count: finalElectionCount,
+              elected_count: finalElectionCount,
+
+              // (3) 유형 -> method
+              method: backendProfile.elected_type || "국회의원",
+              // (백업용)
+              type_display: backendProfile.elected_type || "국회의원",
+              
+              // (4) 기타
+              image: backendProfile.image_url || backendProfile.img || null,
+              gender: backendProfile.gender,
+              party: backendProfile.party,
+              
+              type: 'person', 
+              committees: formattedCommittees,
+              total_bills_count: data.representative_bills_count || 0 
+          });
         }
       } catch (err) {
         console.error("Failed to load details:", err);
+      } finally {
+        setIsLoadingProfile(false);
       }
     };
 
-    // Chạy song song cả 2 hàm
     fetchBills();
     fetchDetail();
 
-  }, [memberProfile]);
+  }, [memberProfile]); 
   
-  // ------------- 2. FILTER / SEARCH -------------const handleSearch = () => {
-    // Gom tất cả các filter hiện tại thành 1 object
-    const handleSearch = () => {
-      // Gom tất cả các filter hiện tại thành 1 object
-      const filtersToPass = {
-         name: filterName,
-         party: selectedParty,
-         city: selectedCity,
-         district: selectedDistrict,
-         committee: selectedCommittee,
-         gender: selectedGender,
-         age: selectedAge,
-         count: selectedCount,
-         method: selectedMethod
-      };
-      navigate('/sentiment/member', { state: { incomingFilters: filtersToPass } });
+  // ------------- 2. HANDLERS -------------
+  const handleSearch = () => {
+    const filtersToPass = {
+       name: filterName, party: selectedParty, city: selectedCity, district: selectedDistrict,
+       committee: selectedCommittee, gender: selectedGender, age: selectedAge,
+       count: selectedCount, method: selectedMethod
     };
+    navigate('/sentiment/member', { state: { incomingFilters: filtersToPass } });
+  };
  
   const handleReset = () => {
-    // Reset tất cả các state về mặc định
-    setFilterName("");
-    setFilterBill("");
-    setSelectedParty("all");
-    setSelectedCity("all");
-    setSelectedDistrict("all");
-    setSelectedCommittee("all");
-    setSelectedGender("all");
-    setSelectedAge("all");
-    setSelectedCount("all");
-    setSelectedMethod("all");
-
+    setFilterName(""); setFilterBill(""); setSelectedParty("all"); setSelectedCity("all");
+    setSelectedDistrict("all"); setSelectedCommittee("all"); setSelectedGender("all");
+    setSelectedAge("all"); setSelectedCount("all"); setSelectedMethod("all");
     setBills(originalBills);
   };
 
-  // ------------- 3. GUARD -------------
   if (!memberProfile) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
@@ -166,19 +172,19 @@ export function LegislatorDashboard() {
     );
   }
 
-  // ------------- 4. NAVIGATE DETAIL -------------
   const goToDetail = (bill) => {
     navigate('/analysis/detail', { 
       state: { 
         legislatorName: profileData?.name || memberProfile.name,
         legislatorProfile: profileData, 
         billInfo: bill,
-        aiSummary,           
+        aiSummary,   
+        billsentiment: bill.sentiment || bill.score || "",        
       } 
     });
   };
 
-  // ------------- 5. RENDER -------------
+  // ------------- 3. RENDER -------------
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -186,67 +192,87 @@ export function LegislatorDashboard() {
         {/* Header */}
         <div className="flex justify-between items-center">
           <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => navigate(-1)}
-              className="rounded-full hover:bg-slate-200"
-            >
+            <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="rounded-full hover:bg-slate-200">
               <ArrowLeft className="w-5 h-5 text-slate-600" />
             </Button>
-            <h1 className="text-2xl font-bold text-slate-900">
-              의원 상세 정보
-            </h1>
+            <h1 className="text-2xl font-bold text-slate-900">의원 상세 정보</h1>
           </div>
         </div>
 
-        {/* Filter - ĐÃ SỬA: Truyền đầy đủ Props Value */}
+        {/* Filter */}
         <LegislatorFilter 
-          // 1. Truyền Giá trị (Values)
-          legislatorName={filterName} 
-          billName={filterBill}
-          selectedParty={selectedParty}
-          selectedCity={selectedCity}
-          selectedDistrict={selectedDistrict}
-          selectedCommittee={selectedCommittee}
-          selectedGender={selectedGender}
-          selectedAge={selectedAge}
-          selectedCount={selectedCount}
-          selectedMethod={selectedMethod}
-          
-          // 2. Truyền Options
+          legislatorName={filterName} billName={filterBill} selectedParty={selectedParty}
+          selectedCity={selectedCity} selectedDistrict={selectedDistrict} selectedCommittee={selectedCommittee}
+          selectedGender={selectedGender} selectedAge={selectedAge} selectedCount={selectedCount} selectedMethod={selectedMethod}
           currentDistricts={currentDistricts}
-          
-          // 3. Truyền Setters
-          setLegislatorName={setFilterName}
-          setBillName={setFilterBill}
-          setSelectedParty={setSelectedParty}
-          setSelectedCity={(val) => { setSelectedCity(val); setSelectedDistrict("all"); }} // Reset huyện khi đổi tỉnh
-          setSelectedDistrict={setSelectedDistrict}
-          setSelectedCommittee={setSelectedCommittee}
-          setSelectedGender={setSelectedGender}
-          setSelectedAge={setSelectedAge}
-          setSelectedCount={setSelectedCount}
+          setLegislatorName={setFilterName} setBillName={setFilterBill} setSelectedParty={setSelectedParty}
+          setSelectedCity={(val) => { setSelectedCity(val); setSelectedDistrict("all"); }}
+          setSelectedDistrict={setSelectedDistrict} setSelectedCommittee={setSelectedCommittee}
+          setSelectedGender={setSelectedGender} setSelectedAge={setSelectedAge} setSelectedCount={setSelectedCount}
           setSelectedMethod={setSelectedMethod}
-          
-          // 4. Actions
-          onSearch={handleSearch}
-          onReset={handleReset}
+          onSearch={handleSearch} onReset={handleReset}
         />
 
-        {/* Main content */}
+        {/* AI Summary */}
+        <div className="bg-slate-900 text-white rounded-xl p-6 shadow-lg flex gap-4 items-start">
+          <div className="p-3 bg-blue-600 rounded-full shrink-0 shadow-lg shadow-blue-900/50">
+            <Bot className="w-6 h-6 text-white" />
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-blue-300 mb-2 flex items-center gap-2">
+              AI 요약 리포트 (AI Report)
+            </h3>
+            <p className="text-slate-300 leading-relaxed text-sm md:text-base">
+              {aiSummary || "AI 요약 정보가 없습니다."}
+            </p>
+          </div>
+        </div>
+
+        {/* Main Content */}
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          
-          {/* Profile + Bill table */}
+          {isLoadingProfile ? (
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+              <div className="lg:col-span-1 h-fit shadow-sm border border-slate-200 rounded-lg p-6">
+                <div className="animate-pulse space-y-4">
+                  <div className="h-12 bg-slate-200 rounded"></div>
+                  <div className="h-8 bg-slate-200 rounded"></div>
+                  <div className="h-8 bg-slate-200 rounded"></div>
+                  <div className="h-8 bg-slate-200 rounded"></div>
+                </div>
+              </div>
+              <div className="lg:col-span-3 h-[700px] shadow-sm border border-slate-200 rounded-lg p-6">
+                <div className="animate-pulse space-y-4">
+                  <div className="h-8 bg-slate-200 rounded"></div>
+                  <div className="h-20 bg-slate-200 rounded"></div>
+                  <div className="h-20 bg-slate-200 rounded"></div>
+                </div>
+              </div>
+            </div>
+          ) : (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+           
+           {/* === 여기가 수정된 부분입니다 === */}
+           {/* LegislatorProfile이 원하는 props 이름(count, method)으로 데이터를 넘겨줍니다 */}
            <LegislatorProfile
-              profile={{ 
-                ...profileData, 
-                total_bills: bills.length,
-                count_coop: stats.coop,
-                count_non_coop: stats.nonCoop,
-                count_neutral: stats.neutral
-              }}
+             profile={{ 
+               ...profileData, 
+               
+               // 1. LegislatorProfile.jsx는 'count'를 당선횟수로 사용합니다.
+               count: profileData?.count || profileData?.election_count || profileData?.elected_count || "초선",
+               
+               // 2. LegislatorProfile.jsx는 'method'를 유형으로 사용합니다.
+               method: profileData?.method || profileData?.type_display || profileData?.elected_type || "국회의원",
+
+               // 3. 지역구
+               region: profileData?.region || profileData?.district || "지역구 없음",
+
+               // 4. 통계 및 기타
+               total_bills: profileData?.total_bills_count ?? bills.length,
+               count_coop: stats.coop,
+               count_non_coop: stats.nonCoop,
+               count_neutral: stats.neutral,
+               image: profileData?.image || null
+             }}
             />
             
             <LegislatorBillTable 
@@ -255,21 +281,7 @@ export function LegislatorDashboard() {
               showProposer={false}
             />
           </div>
-
-          {/* AI Summary */}
-          <div className="bg-slate-900 text-white rounded-xl p-6 shadow-lg flex gap-4 items-start">
-            <div className="p-3 bg-blue-600 rounded-full shrink-0 shadow-lg shadow-blue-900/50">
-              <Bot className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h3 className="text-lg font-bold text-blue-300 mb-2 flex items-center gap-2">
-                AI 요약 리포트 (AI Report)
-              </h3>
-              <p className="text-slate-300 leading-relaxed text-sm md:text-base">
-                {aiSummary || "AI 요약 정보가 없습니다."}
-              </p>
-            </div>
-          </div>
+          )}
 
         </div>
       </div>

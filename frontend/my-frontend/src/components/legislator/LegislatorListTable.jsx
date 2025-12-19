@@ -4,6 +4,14 @@ import { Badge } from "@/components/ui/badge";
 // showParty = true (Hiện cột Đảng), = false (Ẩn cột Đảng - dùng khi đã lọc theo Đảng)
 export function LegislatorListTable({ members, onMemberClick, showParty = true , showAIScore}) {
 
+  // 메인 위원회명만 노출 (소위원회 정보 제거)
+  const getMainCommitteeName = (committeeName) => {
+    if (!committeeName) return committeeName;
+    const base = String(committeeName).split("-")[0].trim();
+    const cleaned = base.replace(/\s*(소위원회|소위).*/g, "").trim();
+    return cleaned || base || committeeName;
+  };
+
   // --- CẤU HÌNH CỘT ---
   const columns = [
     {
@@ -29,7 +37,7 @@ export function LegislatorListTable({ members, onMemberClick, showParty = true ,
       header: "소속위원회", // Ủy ban
       width: "2.5fr",
       className: "text-center text-slate-600 truncate px-2",
-      render: (member) => member.committee
+      render: (member) => getMainCommitteeName(member.committee)
     },
     {
       header: "지역", // Khu vực

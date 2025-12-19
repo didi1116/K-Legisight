@@ -10,8 +10,8 @@ export default function SentimentLanding() {
     {
       id: 1,
       title: "국회의원", 
-      eng: "Member",
-      desc: "개별 의원의 성향과 협력도 분석",
+      eng: "Assembly Members",
+      desc: "의원별 발언을 중심으로 협력 성향과 입법 활동 분석",
       icon: User,
       color: "bg-blue-100 text-blue-600",
       hoverBorder: "hover:border-blue-500",
@@ -21,7 +21,7 @@ export default function SentimentLanding() {
       id: 2,
       title: "정당", 
       eng: "Party",
-      desc: "정당별 단합도 및 주요 쟁점 파악",
+      desc: "정당 단위의 협력도와 주요 찬·반 법안 분석",
       icon: Flag, // Hoặc Building
       color: "bg-red-100 text-orange-600",
       hoverBorder: "hover:border-orange-500",
@@ -30,8 +30,8 @@ export default function SentimentLanding() {
     {
       id: 3,
       title: "위원회", 
-      eng: "Committee",
-      desc: "상임위별 회의 분위기 및 키워드",
+      eng: "Committees",
+      desc: "위원회 회의 발언을 통해 논의 분위기와 쟁점 파악",
       icon: Scale,
       color: "bg-emerald-100 text-emerald-600",
       hoverBorder: "hover:border-emerald-500",
@@ -40,8 +40,8 @@ export default function SentimentLanding() {
     {
       id: 4,
       title: "법안", 
-      eng: "Bill",
-      desc: "특정 법안의 입법 과정 추적",
+      eng: "Bills",
+      desc: "법안을 중심으로 입법 과정과 협력 구조 분석",
       icon: ScrollText,
       color: "bg-purple-100 text-purple-600",
       hoverBorder: "hover:border-purple-500",
@@ -55,13 +55,11 @@ export default function SentimentLanding() {
       {/* Header đơn giản */}
       <div className="text-center mb-12 max-w-2xl">
         <h1 className="text-3xl md:text-4xl font-bold text-slate-900 mb-4">
-          분석 대상을 선택하세요
+          분석 대상을 선택해보세요!
         </h1>
         <p className="text-slate-500 text-lg">
-          K-LegiSight는 4가지 관점에서 심층적인 감성 분석 데이터를 제공합니다.
+          K-LegiSight는 입법 과정의 협력 구조를 다각도로 제공합니다.
         </p >
-        <p className="text-slate-500">
-            원하시는 항목을 클릭해주세요.</p>
       </div>
 
       {/* Grid 4 ô (2x2) */}

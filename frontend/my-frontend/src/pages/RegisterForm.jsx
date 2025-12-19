@@ -71,15 +71,13 @@ export function SignupForm() {
             <div className="absolute bottom-0 right-0 w-[300px] h-[300px] bg-purple-500/20 rounded-full blur-[80px]"></div>
         </div>
 
-        <div className="relative z-20 flex items-center gap-2 text-lg font-bold">
-          <div className="p-1 bg-blue-600 rounded-lg">
-            <Activity className="h-5 w-5 text-white" />
-          </div>
-         <span>
-          <Link to ="/home">
-            K-LegiSight
-          </Link>
+        <div className="relative z-20 text-lg font-bold -mt-6">
+        <Link to="/home" className="flex items-center gap-2">
+            <img src="/logo.png" className="w-16 h-20 object-contain"/>
+            <span>
+                K-LegiSight
             </span>
+        </Link>
         </div>
 
         <div className="relative z-20 flex-1 flex items-center justify-center">
@@ -105,11 +103,11 @@ export function SignupForm() {
         <div className="relative z-20 mt-auto">
           <blockquote className="space-y-2">
             <p className="text-lg font-medium leading-relaxed">
-              &ldquo;데이터로 세상을 바꾸는 여정,<br/> 지금 K-LegiSight와 함께 시작하세요.&rdquo;
+              &ldquo;데이터로 세상을 바라보는 여정,<br/> 지금 K-LegiSight와 함께 시작하세요.&rdquo;
             </p>
             <footer className="text-sm text-slate-400">
             <p>국립부경대학교 디지털 스마트 부산 아카데미 부경대 7기</p>
-            <p className="mt-1 opacity-60">금상첨화</p>
+            <p className="mt-1 opacity-60">Our Members: 박지원, 김승우, 강나영, 팜 티 옌비</p>
                 </footer>
           </blockquote>
         </div>

@@ -1,288 +1,362 @@
 // src/pages/BillAnalysis.jsx
-import React, { useMemo, useState } from "react";
-import { FileText, FileSearch, Users, BarChart3, Loader2, MessageSquare } from "lucide-react";
+import React, { useMemo, useState, useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Users, MessageSquare, ArrowLeft, UserPlus, Activity, Mic, Medal, TrendingUp, Loader2 } from "lucide-react"; 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
-
-const INITIAL_FORM = {
-  bill_name: "인공지능",
-  bill_number: "",
-  proposer: "",
-  submission_type: "all",
-};
 
 export function BillAnalysis() {
-  const [form, setForm] = useState(INITIAL_FORM);
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // State quản lý dữ liệu
+  const [billData, setBillData] = useState(null);
   const [billInfo, setBillInfo] = useState(null);
   const [stats, setStats] = useState(null);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true); 
 
-  const handleChange = (key, value) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
+  const PARTY_ID_MAP = {
+    "국민의힘": 106,
+    "더불어민주당": 101,
+    "정의당": 107,
+    "무소속": 100,
+    "새로운미래": 109,
+    "기본소득당": 113,
+    "미래통합당": 104,
+    "시대전환": 115,
+    "국민의당": 108,
+    "미래한국당": 105,
+    // Thêm các đảng khác nếu cần
   };
 
-  const handleSearch = async () => {
-    setLoading(true);
-    setError("");
-    setMessage("");
-
-    try {
-      const res = await fetch("http://localhost:8000/api/bills/analysis", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.detail || "법안 분석 요청에 실패했습니다.");
-      }
-
-      setBillInfo(data.bill_info || null);
-      setStats(data.stats || null);
-      setMessage(data.message || "");
-
-      if (!data.stats?.total_speeches) {
-        setError("해당 검색 조건에 대한 발언 데이터가 없습니다.");
-      }
-    } catch (err) {
-      setBillInfo(null);
-      setStats(null);
-      setError(err.message || "요청 중 오류가 발생했습니다.");
-    } finally {
-      setLoading(false);
+  // 2. 🔥 THÊM: Hàm xử lý click
+  const handlePartyClick = (partyName) => {
+    const partyId = PARTY_ID_MAP[partyName];
+    
+    if (partyId) {
+        navigate("/sentiment/party", { 
+            state: { partyId: partyId } 
+        });
+    } else {
+        alert("이 정당에 대한 상세 분석 데이터가 없습니다.");
     }
   };
 
-  const hasPartyData = useMemo(() => {
-    return Boolean(stats?.party_breakdown && stats.party_breakdown.length > 0);
+  // --- 🔥 PHẦN KẾT NỐI BACKEND QUAN TRỌNG ---
+  useEffect(() => {
+    const fetchData = async () => {
+      setIsLoading(true);
+
+      // 1. Kiểm tra nếu có dữ liệu truyền qua Router (từ trang Search)
+      if (location.state?.billData) {
+        const data = location.state.billData;
+        setBillData(data);
+        setBillInfo(data.bill_info);
+        setStats(data.stats);
+        setIsLoading(false);
+        return;
+      }
+
+      // 2. Nếu không có state (F5 refresh), lấy ID từ URL và gọi API
+      // Giả sử URL là: /sentiment/bill?query=2112345
+      const searchParams = new URLSearchParams(location.search);
+      const queryId = searchParams.get("query"); 
+
+      if (queryId) {
+        try {
+          // Gọi API Backend (Port 8000)
+          const response = await fetch(`http://localhost:8000/api/bills/${queryId}/detail`);
+          
+          if (!response.ok) {
+            throw new Error("Không tìm thấy dữ liệu pháp luật");
+          }
+
+          const data = await response.json();
+          setBillData(data);
+          setBillInfo(data.bill_info);
+          setStats(data.stats);
+        } catch (error) {
+          console.error("Lỗi khi tải dữ liệu:", error);
+          alert("데이터를 불러오는 중 오류가 발생했습니다.");
+          navigate(-1); 
+        }
+      } else {
+        navigate("/home");
+      }
+      
+      setIsLoading(false);
+    };
+
+    fetchData();
+  }, [location, navigate]);
+
+  // --- Logic tính toán hiển thị (Giữ nguyên) ---
+  const proposersList = useMemo(() => {
+    const rawText = billInfo?.proposer || billInfo?.proposer_name || "";
+    if (!rawText) return [];
+    return rawText.split(/,|외\s\d+인/).map(name => name.trim()).filter(Boolean);
+  }, [billInfo]);
+
+  const topCoopMembers = useMemo(() => {
+    if (!stats?.individual_members || stats.individual_members.length === 0) return [];
+    // 점수 기준 내림차순 정렬 후 상위 5명
+    return [...stats.individual_members]
+      .filter(m => m.score != null)
+      .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0))
+      .slice(0, 5); 
   }, [stats]);
 
-  const scoreTone = (score) => {
-    if (score >= 70) return { color: "text-emerald-600", label: "협력적 분위기" };
-    if (score <= 40) return { color: "text-rose-600", label: "갈등 요소 존재" };
-    return { color: "text-amber-600", label: "부분 협력" };
+  const topActiveMembers = useMemo(() => {
+    if (!stats?.individual_members || stats.individual_members.length === 0) return [];
+    // 발언 횟수 기준 내림차순 정렬 후 상위 5명
+    return [...stats.individual_members]
+      .filter(m => m.n_speeches != null)
+      .sort((a, b) => (Number(b.n_speeches) || 0) - (Number(a.n_speeches) || 0))
+      .slice(0, 5);
+  }, [stats]);
+
+const handleMemberClick = (member) => {
+    navigate("/analysis/detail", { 
+      state: {
+        legislatorName: member.member_name,
+        legislatorProfile: {
+          member_id: member.member_id,
+          name: member.member_name,
+          party: member.party_name,
+        },
+        // Thông tin dự luật hiện tại
+        billInfo: {
+          billNumber: billInfo.bill_id, // Quan trọng: dùng để gọi API lấy speeches
+          billName: billInfo.bill_name,
+          date: billInfo.propose_date || billInfo.date,
+          scoreProbMean: member.score, // Điểm của cá nhân này
+          role: "심사 참여", 
+        },
+        // AI Summary (nếu có trong tương lai)
+        aiSummary: null 
+      }
+    });
   };
 
+  const PARTY_THEME = {
+    "국민의힘": { badge: "bg-red-50 text-red-700 border-red-200", text: "text-red-700", bar: "bg-red-500" },
+    "더불어민주당": { badge: "bg-blue-50 text-blue-700 border-blue-200", text: "text-blue-700", bar: "bg-blue-500" },
+    "정의당": { badge: "bg-yellow-50 text-yellow-700 border-yellow-200", text: "text-yellow-700", bar: "bg-yellow-500" },
+    "무소속": { badge: "bg-slate-100 text-slate-700 border-slate-200", text: "text-slate-700", bar: "bg-slate-500" },
+    "새로운미래": { badge: "bg-blue-50 text-blue-700 border-blue-200", text: "text-blue-700", bar: "bg-blue-500" },
+    "기본소득당": { badge: "bg-teal-50 text-teal-700 border-teal-200", text: "text-teal-700", bar: "bg-teal-500" },
+    "조국혁신당": { badge: "bg-blue-900 text-white border-blue-800", text: "text-blue-900", bar: "bg-blue-900" },
+    "개혁신당": { badge: "bg-orange-50 text-orange-700 border-orange-200", text: "text-orange-700", bar: "bg-orange-500" },
+    default: { badge: "bg-slate-100 text-slate-700 border-slate-200", text: "text-slate-700", bar: "bg-slate-500" }
+  };
+
+  const getPartyTheme = (partyName) => PARTY_THEME[partyName] || PARTY_THEME.default;
+
+  const formatScore = (value) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(4) : "0.00";
+  };
+
+  const totalCoopScore = Number(stats?.total_cooperation ?? 0);
+  const hasPartyData = Boolean(stats?.party_breakdown && stats.party_breakdown.length > 0);
+
+  // Hiển thị màn hình Loading
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="text-center">
+          <Loader2 className="w-10 h-10 animate-spin text-blue-600 mx-auto mb-4" />
+          <p className="text-slate-500">데이터를 분석 중입니다...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!billData) return null;
+
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-8">
-      <div className="max-w-6xl mx-auto space-y-8">
-        <div className="space-y-2">
-          <div className="flex items-center gap-3">
-            <FileSearch className="w-6 h-6 text-blue-700" />
-            <h1 className="text-3xl font-bold text-slate-900">법안 중심 검색 (Bill Analysis)</h1>
-          </div>
-          <p className="text-slate-500">
-            법안별 발언 수, 전체 및 정당별 협력도를 분석합니다.
-          </p>
+    <div className="min-h-screen bg-slate-50 px-4 py-8 font-sans">
+      <div className="max-w-6xl mx-auto space-y-6">
+        
+        {/* --- 🔥 NEW UNIFIED HEADER (Gom chung Tên + Thống kê) --- */}
+        <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                
+                {/* CỘT TRÁI: Thông tin Dự luật (Chiếm 2/3) */}
+                <div className="lg:col-span-2 flex flex-col justify-center">
+                    <div className="flex items-center gap-2 mb-3">
+                        <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="h-8 w-8 -ml-2 rounded-full hover:bg-slate-100">
+                            <ArrowLeft className="w-5 h-5 text-slate-600" />
+                        </Button>
+                        <Badge variant="outline" className="text-slate-500">{billInfo?.bill_id || "N/A"}</Badge>
+                        {billInfo?.committee && <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-100">{billInfo.committee}</Badge>}
+                    </div>
+                    
+                    <h1 className="text-2xl md:text-3xl font-bold text-slate-900 leading-tight mb-4">
+                        {billInfo?.bill_name}
+                    </h1>
+                    
+                    {/* Người đề xuất */}
+                    <div className="flex items-start gap-2">
+                        <UserPlus className="w-4 h-4 mt-1.5 text-slate-400 shrink-0" />
+                        <div className="flex flex-wrap gap-2">
+                            {proposersList.length > 0 ? proposersList.map((name, idx) => (
+                                <span key={idx} className={`text-sm px-2 py-0.5 rounded border ${idx === 0 ? "bg-slate-800 text-white border-slate-800 font-medium" : "bg-white text-slate-600 border-slate-200"}`}>
+                                    {name} {idx === 0 && "(대표)"}
+                                </span>
+                            )) : <span className="text-sm text-slate-400">발의자 정보 없음</span>}
+                        </div>
+                    </div>
+                </div>
+
+                {/* CỘT PHẢI: 2 Chỉ số thống kê (Chiếm 1/3) */}
+                <div className="lg:col-span-1 grid grid-cols-2 gap-3">
+                    {/* Stat 1: Speeches */}
+                    <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 flex flex-col items-center justify-center text-center">
+                        <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center mb-2">
+                            <MessageSquare className="w-4 h-4 text-blue-600" />
+                        </div>
+                        <div className="text-2xl font-bold text-slate-900">{stats?.total_speeches ?? 0}</div>
+                        <div className="text-xs text-slate-500 font-medium">전체 발언 (회)</div>
+                    </div>
+
+                    {/* Stat 2: Score */}
+                    <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 flex flex-col items-center justify-center text-center">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center mb-2 ${totalCoopScore >= 50 ? 'bg-emerald-100' : 'bg-rose-100'}`}>
+                            <Activity className={`w-4 h-4 ${totalCoopScore >= 50 ? 'text-emerald-600' : 'text-rose-600'}`} />
+                        </div>
+                        <div className={`text-2xl font-bold ${totalCoopScore >= 50 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                            {formatScore(totalCoopScore)}
+                        </div>
+                        <div className="text-xs text-slate-500 font-medium">평균 협력도</div>
+                    </div>
+                </div>
+            </div>
         </div>
 
-        {/* Search Form */}
-        <Card className="shadow-sm border-0">
-          <CardContent className="pt-6 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="space-y-2">
-                <label className="text-sm text-slate-600 font-medium">법안명 (Bill Name)</label>
-                <Input
-                  value={form.bill_name}
-                  onChange={(e) => handleChange("bill_name", e.target.value)}
-                  placeholder="예: 인공지능"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-slate-600 font-medium">의안번호 (No.)</label>
-                <Input
-                  value={form.bill_number}
-                  onChange={(e) => handleChange("bill_number", e.target.value)}
-                  placeholder="예: 2200123"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-slate-600 font-medium">발의자 (Proposer)</label>
-                <Input
-                  value={form.proposer}
-                  onChange={(e) => handleChange("proposer", e.target.value)}
-                  placeholder="의원명 입력"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-slate-600 font-medium">제출유형 (Type)</label>
-                <Select
-                  value={form.submission_type}
-                  onValueChange={(val) => handleChange("submission_type", val)}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="전체 (All)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">전체 (All)</SelectItem>
-                    <SelectItem value="의원">의원</SelectItem>
-                    <SelectItem value="정부">정부</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="flex justify-end">
-              <Button onClick={handleSearch} disabled={loading} className="gap-2">
-                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-                검색 및 분석
-              </Button>
-            </div>
-            {error && <div className="text-sm text-rose-600">{error}</div>}
-            {!error && message && <div className="text-sm text-slate-500">{message}</div>}
-          </CardContent>
-        </Card>
-
-        {/* Summary Cards */}
-        {billInfo && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-slate-900 text-white rounded-xl p-6 shadow-lg space-y-3">
-              <Badge variant="outline" className="bg-slate-800 text-slate-200 border-slate-700">
-                {billInfo.bill_no || "N/A"}
-              </Badge>
-              <div className="space-y-1">
-                <p className="text-sm text-blue-200">법안</p>
-                <div className="flex items-start gap-2">
-                  <FileText className="w-5 h-5 mt-0.5 text-blue-200" />
-                  <h3 className="text-xl font-semibold leading-tight">{billInfo.bill_name}</h3>
-                </div>
-              </div>
-              <p className="text-sm text-slate-200">발의: {billInfo.proposer}</p>
-            </div>
-
-            <Card className="shadow-sm">
-              <CardContent className="p-6 flex flex-col gap-3">
-                <div className="flex items-center gap-3">
-                  <MessageSquare className="w-10 h-10 text-blue-600" />
-                  <div>
-                    <p className="text-sm text-slate-500">전체 발언 수</p>
-                    <p className="text-2xl font-bold text-slate-900">
-                      {stats?.total_speeches ?? 0}회
-                    </p>
-                  </div>
-                </div>
-                <p className="text-sm text-slate-500">심사 과정에서의 총 발언 횟수</p>
-              </CardContent>
+        {/* --- HÀNG 2: Grid chia đôi (Đảng phái vs Top 5 Hợp tác) --- */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            
+            {/* Left: Party Breakdown */}
+            <Card className="shadow-sm border border-slate-200 flex flex-col h-full">
+                <CardHeader className="border-b border-slate-100 pb-4">
+                    <CardTitle className="text-lg text-slate-900 flex items-center gap-2">
+                        <Users className="w-5 h-5 text-indigo-600" />
+                        정당별 협력도 
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-6 flex-1">
+                    {hasPartyData ? (
+                        <div className="space-y-5">
+                            {stats.party_breakdown.map((p) => {
+                                const theme = getPartyTheme(p.party_name);
+                                const score = Number(p.avg_score ?? 0);
+                                const percent = Math.min(100, Math.max(0, score));
+                                
+                                return (
+                                    <div key={p.party_name} 
+                                    className="relative group cursor-pointer" // 3. 🔥 Thêm cursor-pointer và group
+                                    onClick={() => handlePartyClick(p.party_name)}>
+                                        <div className="flex justify-between items-end mb-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className="font-bold text-slate-700 text-sm group-hover:text-blue-600 group-hover:underline transition-colors">{p.party_name}</span>
+                                                <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{p.speech_count || p.member_count}회</span>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className={`font-bold ${theme.text}`}>{formatScore(score)}</span>
+                                            </div>
+                                        </div>
+                                        <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                            <div 
+                                                className={`h-full rounded-full transition-all duration-1000 ${theme.bar}`} 
+                                                style={{ width: `${percent}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <div className="text-center py-8 text-slate-500">데이터 부족</div>
+                    )}
+                </CardContent>
             </Card>
 
-            <Card className="shadow-sm">
-              <CardContent className="p-6 flex flex-col gap-3">
-                <div className="flex items-center gap-3">
-                  <BarChart3 className="w-10 h-10 text-rose-600" />
-                  <div>
-                    <p className="text-sm text-slate-500">전체 협력도 (평균)</p>
-                    <p className={`text-2xl font-bold ${scoreTone(stats?.total_cooperation ?? 0).color}`}>
-                      {stats?.total_cooperation ?? 0}점 <span className="text-base text-slate-500">/ 100</span>
-                    </p>
-                  </div>
-                </div>
-                <p className="text-sm text-slate-500">{scoreTone(stats?.total_cooperation ?? 0).label}</p>
-              </CardContent>
+            {/* Right: Top 5 Cooperative Members */}
+            <Card className="shadow-sm border border-slate-200 flex flex-col h-full">
+                <CardHeader className="border-b border-slate-100 pb-4">
+                    <CardTitle className="text-lg text-slate-900 flex items-center gap-2">
+                        <Medal className="w-5 h-5 text-emerald-600" />
+                        협력 의원 TOP 5 
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-6 flex-1">
+                    {topCoopMembers.length > 0 ? (
+                        <div className="space-y-3">
+                            {topCoopMembers.map((m, idx) => (
+                                <div key={idx} 
+                                onClick={() => handleMemberClick(m)}
+                                className="flex items-center justify-between p-3 rounded-xl bg-slate-50 hover:bg-emerald-50 transition-colors border border-transparent hover:border-emerald-100">
+                                    <div className="flex items-center gap-3">
+                                        <div className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-bold ${idx === 0 ? 'bg-yellow-400 text-white shadow-sm' : 'bg-slate-200 text-slate-500'}`}>
+                                            {idx + 1}
+                                        </div>
+                                        <div>
+                                            <div className="text-sm font-bold text-slate-900">{m.member_name}</div>
+                                            <div className="text-[10px] text-slate-500">{m.party_name}</div>
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                        <div className="text-sm font-bold text-emerald-600">{formatScore(m.score)}</div>
+                                        <div className="text-[10px] text-slate-400">{m.n_speeches}회 발언</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="text-center py-8 text-slate-500">데이터 없음</div>
+                    )}
+                </CardContent>
             </Card>
-          </div>
+        </div>
+
+        {/* --- HÀNG 3: Top 5 Active Speakers (Những người nói nhiều nhất) --- */}
+        {topActiveMembers.length > 0 && (
+            <Card className="shadow-sm border border-slate-200 mt-6">
+                <CardHeader className="border-b border-slate-100 pb-4 bg-orange-50/50">
+                    <CardTitle className="text-lg text-slate-900 flex items-center gap-2">
+                        <TrendingUp className="w-5 h-5 text-orange-600" /> 
+                        가장 활발한 발언자 TOP 5 
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="pt-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+                        {topActiveMembers.map((m, idx) => (
+                            <div 
+                            key={`${m.member_name}-${idx}`} 
+                            onClick={() => handleMemberClick(m)}
+                            className="flex flex-col items-center p-4 rounded-xl border border-slate-100 bg-white hover:shadow-md transition-shadow text-center">
+                                <div className={`w-8 h-8 flex items-center justify-center rounded-full font-bold text-sm mb-2
+                                    ${idx === 0 ? "bg-yellow-100 text-yellow-700 ring-1 ring-yellow-200" : 
+                                      idx === 1 ? "bg-slate-200 text-slate-700" :
+                                      idx === 2 ? "bg-orange-100 text-orange-800" : "bg-slate-50 text-slate-400"
+                                    }`}>
+                                    {idx + 1}
+                                </div>
+                                <div className="font-bold text-slate-900">{m.member_name}</div>
+                                <div className="text-xs text-slate-500 mb-2">{m.party_name}</div>
+                                <Badge variant="secondary" className="bg-blue-50 text-blue-700 mb-1">
+                                    <Mic className="w-3 h-3 mr-1" /> {m.n_speeches}회
+                                </Badge>
+                                <span className="text-[10px] text-slate-400">협력도 {formatScore(m.score)}</span>
+                            </div>
+                        ))}
+                    </div>
+                </CardContent>
+            </Card>
         )}
 
-        {/* Party Breakdown */}
-        <Card className="shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-slate-900">
-              <Users className="w-5 h-5 text-blue-600" />
-              정당별 협력도 (Party Cooperation Score)
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {hasPartyData ? (
-              <div className="space-y-4">
-                {stats.party_breakdown.map((p) => (
-                  <div key={p.party_name} className="space-y-2">
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="bg-slate-100 text-slate-700 border-slate-200">
-                          {p.party_name}
-                        </Badge>
-                        <span className="text-slate-500">{p.member_count}명</span>
-                      </div>
-                      <span className="font-semibold text-slate-800">{p.avg_score}점</span>
-                    </div>
-                    <Progress value={p.avg_score} className="h-2" />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="py-8 text-center text-slate-500">정당별 데이터가 충분하지 않습니다.</div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Member & Speech detail */}
-        {stats?.individual_members?.length > 0 && (
-          <Card className="shadow-sm">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-slate-900">주요 발언자 (Top Speakers)</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {stats.individual_members.slice(0, 5).map((m) => (
-                <div key={`${m.member_name}-${m.party_name}`} className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-blue-50 text-blue-700 font-bold flex items-center justify-center">
-                      {m.member_name?.slice(0, 2) || "??"}
-                    </div>
-                    <div>
-                      <div className="font-semibold text-slate-900">{m.member_name}</div>
-                      <div className="text-sm text-slate-500">{m.party_name} · {m.n_speeches}회 발언</div>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-sm text-slate-500">평균 협력도</div>
-                    <div className="text-lg font-bold text-slate-900">{m.score}점</div>
-                  </div>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        )}
-
-        {stats?.speeches_content?.length > 0 && (
-          <Card className="shadow-sm">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-slate-900">발언 상세</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {stats.speeches_content.slice(0, 6).map((s) => (
-                <div key={s.speech_id} className="p-4 rounded-lg bg-slate-100 border border-slate-200 space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <div className="flex items-center gap-2 text-slate-600">
-                      <FileText className="w-4 h-4" />
-                      <span className="font-semibold text-slate-800">{s.member_name}</span>
-                      <span className="text-slate-500">({s.party_name})</span>
-                    </div>
-                    <Badge variant="secondary" className="bg-blue-100 text-blue-700 hover:bg-blue-100">
-                      {s.score}점
-                    </Badge>
-                  </div>
-                  <Separator />
-                  <p className="text-sm text-slate-700 leading-relaxed max-h-20 overflow-hidden">
-                    {s.text}
-                  </p>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        )}
       </div>
     </div>
   );

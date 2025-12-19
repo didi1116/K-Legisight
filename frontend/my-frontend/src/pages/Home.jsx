@@ -1,6 +1,6 @@
 // src/pages/Home.jsx
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,6 +14,11 @@ import { supabase } from '@/lib/supabaseClient';
 export function Home() {
     // 1. State cho User
     const [user, setUser] = useState(null);
+    const navigate = useNavigate();
+
+    // State cho 검색
+    const [searchQuery, setSearchQuery] = useState('');
+    const [isSearching, setIsSearching] = useState(false);
 
     // State cho dữ liệu thống kê
     const [stats, setStats] = useState({
@@ -43,6 +48,55 @@ export function Home() {
     const handleLogout = async () => {
         await supabase.auth.signOut();
         setUser(null);
+    };
+
+    // 3. LOGIC TÌM KIẾM CẢI TIẾN (Nhận tham số 'term')
+    const handleSearch = async (term) => {
+        // Ưu tiên lấy từ tham số 'term' (nếu click tag), nếu không thì lấy từ state (nếu gõ input)
+        const query = (typeof term === 'string' ? term : searchQuery).trim();
+
+        if (!query) {
+            alert('검색어를 입력해주세요.');
+            return;
+        }
+
+        // Cập nhật giao diện input cho khớp với từ khóa vừa click
+        setSearchQuery(query);
+        setIsSearching(true);
+
+        try {
+            // Gọi API với biến query (chứ không phải searchQuery state)
+            const response = await fetch(
+                `http://localhost:8000/api/unified-search?query=${encodeURIComponent(query)}`
+            );
+            const result = await response.json();
+
+            if (result.type === 'legislator') {
+                navigate(`/sentiment/member?member_id=${result.data.member_id}`);
+            } else if (result.type === 'bill') {
+                navigate(`/sentiment/bill?query=${encodeURIComponent(query)}`);
+            } else {
+                alert(result.message || '검색 결과가 없습니다.');
+            }
+        } catch (error) {
+            console.error('검색 중 오류:', error);
+            alert('검색 중 오류가 발생했습니다.');
+        } finally {
+            setIsSearching(false);
+        }
+    };
+
+    const handleTagClick = (tag) => {
+    let cleanTag = tag.replace('#', '').trim();
+    cleanTag = cleanTag.replace('의원', '').trim();
+
+    handleSearch(cleanTag);
+};
+
+    const handleKeyPress = (e) => {
+        if (e.key === 'Enter') {
+            handleSearch(); // Không truyền tham số -> lấy từ input
+        }
     };
 
     // useEffect: Lấy dữ liệu Dashboard
@@ -80,10 +134,8 @@ export function Home() {
 
             {/* Navbar */}
             <nav className="relative container mx-auto px-6 py-6 flex justify-between items-center z-10">
-                <div className="text-2xl font-bold tracking-tighter flex items-center gap-2">
-                    <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-                        <Activity className="text-white w-5 h-5" />
-                    </div>
+                <div className="text-2xl font-bold tracking-tighter flex items-center gap-0.5">
+                    <img src="/logo.png" className="w-20 h-20 mr-2 object-contain"/>
                     <span>
                         <Link to ="/home">
                         K-LegiSight
@@ -100,7 +152,9 @@ export function Home() {
                                 <div className="text-sm font-medium text-white">{user.email?.split('@')[0]} 님</div>
                             </div>
                             <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold border border-slate-700 shadow-lg">
-                                <User className="h-4 w-4" />
+                               <Link to="/dashboard">
+                               <User className="h-4 w-4" />
+                                 </Link>
                             </div>
                             <Button 
                                 variant="ghost" 
@@ -134,17 +188,20 @@ export function Home() {
             {/* Hero Content */}
             <div className="relative container mx-auto px-6 mt-20 text-center z-10">
             
-            <h1 className="text-4xl md:text-6xl font-bold tracking-tight leading-tight mb-6">
-                국회 데이터를 <span className="text-blue-500">예측</span>하고<br />
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-400">
-                입법 흐름
-                </span>을 파악하세요.
+            <h1 className="text-4xl md:text-6xl font-bold leading-relaxed mb-8 text-white text-center">
+              국회의원의 발언을 기반으로
+              <br />
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">
+                입법 과정의 흐름
+              </span>
+              을 파악하세요
             </h1>
             
             <p className="text-slate-400 text-lg md:text-xl max-w-2xl mx-auto mb-10">
-                K-LegiSight는 국회 회의록 빅데이터를 분석하여<br className="hidden md:block" />
-                의원의 발언 성향과 법안의 통과 가능성을 투명하게 제공합니다.
-            </p>
+                K-LegiSight는 국회 회의록을 법안 단위로 구조화하고,<br className="hidden md:block" />
+                의원의 발언 태도 분석을 통해 입법 과정의 협력과 갈등을 정랑화하여, <br />
+                각종 분석 지표를 제공합니다.
+                            </p>
 
             {/* Search Bar */}
             <div className="max-w-2xl mx-auto">
@@ -154,21 +211,35 @@ export function Home() {
                     <Search className="ml-4 text-slate-400 h-6 w-6" />
                     <input 
                     type="text" 
-                    placeholder="궁금한 의원이나 법안을 검색해보세요..." 
+                    placeholder="궁금한 의원이나 법안을 검색하세요!" 
                     className="w-full p-3 text-lg text-slate-900 placeholder-slate-400 bg-transparent border-none outline-none"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyPress={handleKeyPress}
+                    disabled={isSearching}
                     />
-                    <Button className="rounded-full px-8 h-12 bg-slate-900 hover:bg-slate-800 text-white font-medium text-lg">
-                    검색
+                    <Button 
+                    className="rounded-full px-8 h-12 bg-slate-900 hover:bg-slate-800 text-white font-medium text-lg disabled:opacity-50"
+                    onClick={handleSearch}
+                    disabled={isSearching}
+                    >
+                    {isSearching ? '검색 중...' : '검색'}
                     </Button>
                 </div>
                 </div>
 
                 <div className="mt-4 flex flex-wrap justify-center gap-2 text-sm text-slate-400">
-                <span>추천 검색어:</span>
-                <span className="px-3 py-1 bg-slate-800 rounded-full cursor-pointer hover:text-white transition-colors">#AI산업육성법</span>
-                <span className="px-3 py-1 bg-slate-800 rounded-full cursor-pointer hover:text-white transition-colors">#세법개정안</span>
-                <span className="px-3 py-1 bg-slate-800 rounded-full cursor-pointer hover:text-white transition-colors">#법제사법위원회</span>
-                </div>
+                        <span className="px-3 py-1">추천 검색어:</span>
+                        {['# 인공지능법', '# 우원식 의원', '# 지능형 로봇'].map((tag, index) => (
+                            <span 
+                                key={index}
+                                onClick={() => handleTagClick(tag)} // Sự kiện Click Tag
+                                className="px-3 py-1 bg-slate-800 rounded-full cursor-pointer hover:text-white transition-colors hover:bg-slate-700"
+                            >
+                                {tag}
+                            </span>
+                        ))}
+                    </div>
             </div>
             </div>
         </header>
@@ -185,12 +256,16 @@ export function Home() {
                     <Activity className="w-6 h-6 text-blue-600 group-hover:text-white transition-colors" />
                     </div>
                     <CardTitle className="text-2xl font-bold text-slate-800 group-hover:text-blue-600 transition-colors">
-                    감성 분석 (Sentiment)
+                    협력도 분석 
+                    <span className="text-base font-normal text-slate-500"> (Legislative Cooperation Analysis)</span>
                     </CardTitle>
                 </CardHeader>
                 <CardContent>
-                    <p className="text-slate-600 mb-6 text-lg">
-                    회의록 발언을 AI로 분석하여 의원의 태도(협력/비협력/중립)를 명확하게 시각화합니다.
+                    {/* Text Description Updated */}
+                    <p className="text-slate-600 mb-6 text-sm leading-relaxed">
+                    국회 회의록 발언을 입법 맥락에 특화된 감성분석 모델로 분류하여,<br/>
+                    법안에 대한 협력·비협력·중립 발언을 정량화합니다.<br/>
+                    <strong>의원·정당·위원회·법안 단위의 협력도 지표를 제공합니다.</strong>
                     </p>
                     
                     {/* Dữ liệu động */}
@@ -202,6 +277,15 @@ export function Home() {
                     <div className="w-full bg-slate-100 h-3 rounded-full overflow-hidden">
                         <div className="bg-blue-500 h-full rounded-full transition-all duration-1000" style={{ width: `${stats.sentiment.cooperative}%` }}></div>
                     </div>
+
+                    {/* Neutral - Added */}
+                    <div className="flex justify-between text-sm font-medium">
+                        <span className="text-slate-600">중립</span>
+                        <span className="text-slate-500">{stats.sentiment.neutral}%</span>
+                    </div>
+                        <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                            <div className="bg-slate-400 h-full rounded-full" style={{ width: `${stats.sentiment.neutral}%` }}></div>
+                        </div>                    
                     
                     <div className="flex justify-between text-sm font-medium mt-2">
                         <span className="text-slate-600">비협력</span>
@@ -223,13 +307,16 @@ export function Home() {
                     <TrendingUp className="w-6 h-6 text-purple-600 group-hover:text-white transition-colors" />
                     </div>
                     <CardTitle className="text-2xl font-bold text-slate-800 group-hover:text-purple-600 transition-colors">
-                    입법 예측 (Prediction)
+                    입법 예측 보조 분석
+                    <span className="text-base font-normal text-slate-500">(Prediction Support)</span>
                     </CardTitle>
                 </CardHeader>
                 <CardContent>
-                    <p className="text-slate-600 mb-6 text-lg">
-                    협력도와 발언 데이터를 학습한 AI 모델이 법안의 본회의 통과 확률을 예측합니다.
-                    </p>
+                    <p className="text-slate-600 mb-6 text-sm leading-relaxed">
+                    입력된 법안과 의미적으로 유사한 과거 법안 사례를 탐색하고, <br/>
+                    <strong>논의 과정의 협력도와 발언량, 실제 의결 결과를 결합하여<br/></strong>
+                    <strong>설명 가능한 방식으로 분석된 지표를 제공합니다.</strong>
+                     </p>
                     
                     {/* Dữ liệu động */}
                     <div className="bg-slate-50 p-5 rounded-xl border border-slate-100 pointer-events-none">
@@ -240,8 +327,8 @@ export function Home() {
                         </Badge>
                     </div>
                     <div className="flex justify-between text-sm mb-2">
-                        <span>통과 확률</span>
-                        <span className="text-purple-600 font-bold text-lg">{stats.prediction.probability}% 유력</span>
+                        <span className="text-slate-600">가결 확률 </span>
+                        <span className="text-purple-600 font-bold text-lg">{stats.prediction.probability}% </span>
                     </div>
                     <div className="w-full bg-slate-200 h-2 rounded-full">
                         <div className="bg-purple-600 h-full rounded-full transition-all duration-1000" style={{ width: `${stats.prediction.probability}%` }}></div>
@@ -259,52 +346,76 @@ export function Home() {
             <div className="container mx-auto px-6">
             <div className="text-center mb-16">
                 <h2 className="text-3xl font-bold text-slate-900 mb-4">
-                데이터로 만드는 <span className="text-blue-600">투명한 입법 생태계</span>
+                AI와 빅데이터로 확장되는 <span className="text-blue-600">투명한 입법 생태계</span>
                 </h2>
                 <p className="text-slate-500">
-                K-LegiSight는 다양한 분야에서 새로운 가치를 창출합니다.
+                <strong>K-LegiSight는 누가 사용할 수 있나요?</strong>
                 </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+            <div className="grid grid-cols-3 gap-2 md:gap-8">
                 
                 {/* Card 1: Cử tri */}
-                <div className="group p-8 rounded-2xl bg-slate-50 hover:bg-blue-50 border border-slate-100 hover:border-blue-100 transition-all duration-300">
-                <div className="w-14 h-14 bg-white rounded-xl flex items-center justify-center mb-6 shadow-sm group-hover:scale-110 transition-transform">
-                    <span className="text-3xl">🗳️</span>
-                </div>
-                <h3 className="text-xl font-bold text-slate-800 mb-3">스마트한 유권자</h3>
-                <p className="text-slate-600 leading-relaxed text-sm">
-                    우리 지역구 의원이 법안 심사에서<br/>
-                    어떤 태도를 보였는지 데이터로 확인하고,<br/>
-                    현명한 투표 권리를 행사하세요.
-                </p>
+                <div className="group p-2 md:p-8 rounded-2xl bg-slate-50 hover:bg-blue-50 border border-slate-100 hover:border-blue-100 transition-all duration-300 flex flex-col items-center text-center">
+                    {/* Icon */}
+                    <div className="w-8 h-8 md:w-14 md:h-14 bg-white rounded-xl flex items-center justify-center mb-2 md:mb-6 shadow-sm group-hover:scale-110 transition-transform">
+                        <span className="text-lg md:text-3xl">🗳️</span>
+                    </div>
+                    
+                    {/* Title */}
+                    <h3 className="text-xs md:text-xl font-bold text-slate-800 mb-2 md:mb-3 break-keep">
+                        국회 및<br className="block md:hidden"/> 공공 입법 기관
+                    </h3>
+                    
+                    {/* Full Text Description */}
+                    <p className="text-slate-600 leading-tight md:leading-relaxed text-[10px] md:text-sm break-keep">
+                        의원별 발언과 협력 수준을 객관적인 지표로 파악하여, 
+                        법안별 논의 구조와 위원회 내 협력 양상을 정량적으로 분석할 수 있습니다.
+                        <br className="hidden md:block"/><br className="hidden md:block"/>
+                        <strong className="block mt-1 md:mt-0">정책 검토와 입법 과정 관리에 활용 가능한 데이터를 제공합니다.</strong>
+                    </p>
                 </div>
 
                 {/* Card 2: Báo chí */}
-                <div className="group p-8 rounded-2xl bg-slate-50 hover:bg-purple-50 border border-slate-100 hover:border-purple-100 transition-all duration-300">
-                <div className="w-14 h-14 bg-white rounded-xl flex items-center justify-center mb-6 shadow-sm group-hover:scale-110 transition-transform">
-                    <span className="text-3xl">📰</span>
-                </div>
-                <h3 className="text-xl font-bold text-slate-800 mb-3">데이터 저널리즘</h3>
-                <p className="text-slate-600 leading-relaxed text-sm">
-                    객관적인 수치와 시각화 자료를 통해<br/>
-                    복잡한 정치 이슈를 독자들에게<br/>
-                    쉽고 명확하게 전달할 수 있습니다.
-                </p>
+                <div className="group p-2 md:p-8 rounded-2xl bg-slate-50 hover:bg-purple-50 border border-slate-100 hover:border-purple-100 transition-all duration-300 flex flex-col items-center text-center">
+                    {/* Icon */}
+                    <div className="w-8 h-8 md:w-14 md:h-14 bg-white rounded-xl flex items-center justify-center mb-2 md:mb-6 shadow-sm group-hover:scale-110 transition-transform">
+                        <span className="text-lg md:text-3xl">📰</span>
+                    </div>
+                    
+                    {/* Title */}
+                    <h3 className="text-xs md:text-xl font-bold text-slate-800 mb-2 md:mb-3 break-keep">
+                        언론 및<br className="block md:hidden"/> 미디어
+                    </h3>
+                    
+                    {/* Full Text Description */}
+                    <p className="text-slate-600 leading-tight md:leading-relaxed text-[10px] md:text-sm break-keep">
+                        정치·입법 이슈에 대한 의원 및 정당의 입장을 협력도 데이터로 신속하게 파악하고, 
+                        이를 시각적으로 전달할 수 있는 분석 정보를 제공합니다.
+                        <br className="hidden md:block"/><br className="hidden md:block"/>
+                        <strong className="block mt-1 md:mt-0">기사 작성과 이슈 분석을 위한 신뢰 가능한 데이터 소스로 활용될 수 있습니다.</strong>
+                    </p>
                 </div>
 
                 {/* Card 3: Nghiên cứu */}
-                <div className="group p-8 rounded-2xl bg-slate-50 hover:bg-orange-50 border border-slate-100 hover:border-orange-100 transition-all duration-300">
-                <div className="w-14 h-14 bg-white rounded-xl flex items-center justify-center mb-6 shadow-sm group-hover:scale-110 transition-transform">
-                    <span className="text-3xl">🎓</span>
-                </div>
-                <h3 className="text-xl font-bold text-slate-800 mb-3">입법 정책 연구</h3>
-                <p className="text-slate-600 leading-relaxed text-sm">
-                    감성 분석 데이터와 입법 예측 모델을<br/>
-                    활용하여 정량적이고 심도 있는<br/>
-                    정치·행정 연구를 수행하세요.
-                </p>
+                <div className="group p-2 md:p-8 rounded-2xl bg-slate-50 hover:bg-orange-50 border border-slate-100 hover:border-orange-100 transition-all duration-300 flex flex-col items-center text-center">
+                    {/* Icon */}
+                    <div className="w-8 h-8 md:w-14 md:h-14 bg-white rounded-xl flex items-center justify-center mb-2 md:mb-6 shadow-sm group-hover:scale-110 transition-transform">
+                        <span className="text-lg md:text-3xl">🎓</span>
+                    </div>
+                    
+                    {/* Title */}
+                    <h3 className="text-xs md:text-xl font-bold text-slate-800 mb-2 md:mb-3 break-keep">
+                        연구 및<br className="block md:hidden"/> 분석 기관
+                    </h3>
+                    
+                    {/* Full Text Description */}
+                    <p className="text-slate-600 leading-tight md:leading-relaxed text-[10px] md:text-sm break-keep">
+                        회의록 발언을 분석 가능한 데이터로 제공하여, 
+                        정치학·행정학·데이터과학 분야의 실증 연구를 지원합니다.
+                        <br className="hidden md:block"/><br className="hidden md:block"/>
+                        <strong className="block mt-1 md:mt-0">의원 간 협력 구조와 입법 행태를 정량적으로 분석할 수 있는 연구용 데이터셋으로 활용 가능합니다.</strong>
+                    </p>
                 </div>
 
             </div>
@@ -312,7 +423,7 @@ export function Home() {
             {/* Banner đăng ký miễn phí */}
             <div className="mt-16 bg-slate-900 rounded-2xl p-8 md:p-12 text-center relative overflow-hidden">
                 <div className="relative z-10">
-                <h3 className="text-2xl font-bold text-white mb-4">지금 바로 국회 데이터를 확인해보세요</h3>
+                <h3 className="text-2xl font-bold text-white mb-4">지금 바로 대한민국 국회 데이터를 확인해보세요</h3>
                 <p className="text-slate-400 mb-8">회원가입 후 더 많은 분석 리포트를 무료로 열람할 수 있습니다.</p>
                 <Link to="/register">
                     <Button className="bg-white text-slate-900 hover:bg-slate-100 font-bold px-8 h-12 text-base">

@@ -95,28 +95,64 @@ class SearchResponse(BaseModel):
     results: List[BillInfo] = []  # Danh sách các bill liên quan
     ai_summary: Optional[str] = None
 
-
-
-
-
 # --- BILL ANALYSIS ---
 
 class BillSearchInput(BaseModel):
-    bill_name: Optional[str] = None      # Tên pháp án
-    bill_number: Optional[str] = None    # Số hiệu (의안번호)
-    proposer: Optional[str] = None       # Người phát ý (강득구, 정부...)
-    submission_type: Optional[str] = None # Loại: '의원' (Nghị sĩ) / '정부' (Chính phủ)
+    """법안 검색 입력 (4개 조건 지원)"""
+    bill_name: Optional[str] = None      # 법안명
+    bill_number: Optional[str] = None    # 의안번호
+    proposer: Optional[str] = None       # 대표발의자
+    proposer_type: Optional[str] = None  # 제안 유형 (의원/정부 등)
 
 class PartyScoreItem(BaseModel):
     party_name: str
     avg_score: float
     member_count: int
+    speech_count: int  # 발언 수 (명확한 라벨)
+    stance: Optional[str] = "중립"  # 협력/중립/비협력
+
+class BillStatsDetail(BaseModel):
+    """개별 법안의 통계 정보"""
+    total_speeches: int = 0
+    total_cooperation: float = 0.0
+    party_breakdown: List[PartyScoreItem] = []
+    individual_members: List[dict] = []  # 개인별 협력도 정보
+
+class BillAnalysisItem(BaseModel):
+    """개별 법안 분석 결과"""
+    bill_info: dict
+    stats: BillStatsDetail
 
 class BillAnalysisResponse(BaseModel):
-    bill_info: dict  # Thông tin cơ bản (Tên, ngày, người đề xuất...)
-    stats: dict = {
-        "total_speeches": 0,    # Tổng số phát biểu về bill này
-        "total_cooperation": 0.0, # Điểm hợp tác trung bình (Toàn bộ)
-        "party_breakdown": List[PartyScoreItem] # Điểm theo từng đảng
-    }
+    """법안 검색 및 분석 응답 (복수 결과 지원)"""
+    total_count: int = 0
+    search_conditions: dict = {}  # 사용된 검색 조건
+    results: List[BillAnalysisItem] = []  # 검색된 법안 목록
     message: Optional[str] = None
+
+
+# ==========================================
+# 🔥 [MỚI] SCHEMAS CHO DASHBOARD
+# ==========================================
+
+# 1. Input để ghi Log hoạt động (POST /api/log/activity)
+class UserLogInput(BaseModel):
+    activity_type: str  # 'search', 'view_bill', 'view_person'
+    target_name: str    # 'Luật AI', 'Kim Uiyen'
+    details: Optional[str] = None
+
+# 2. Input để Bookmark (POST /api/bookmark)
+class BookmarkInput(BaseModel):
+    item_type: str # 'bill', 'legislator'
+    item_id: str
+    title: str
+    score: Optional[float] = 0.0
+
+# 3. Output cho Dashboard (GET /api/dashboard/me)
+class DashboardData(BaseModel):
+    user_info: Dict[str, Any]
+    stats: Dict[str, Any]
+    recent_activities: List[Dict[str, Any]]
+    saved_bills: List[Dict[str, Any]]
+
+

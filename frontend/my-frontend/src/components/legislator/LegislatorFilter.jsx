@@ -16,7 +16,7 @@ export function LegislatorFilter({
   selectedDistrict, setSelectedDistrict, // (Mới) Thêm cái này để reset quận/huyện
   selectedCommittee, setSelectedCommittee,
   selectedGender, setSelectedGender,
-  selectedAge, setSelectedAge,           // (Mới) Thêm cái này để reset tuổi
+  selectedAge, setSelectedAge,           
   selectedCount, setSelectedCount,
   selectedMethod, setSelectedMethod,
   
@@ -60,7 +60,6 @@ export function LegislatorFilter({
                     <SelectItem value="더불어민주당">더불어민주당</SelectItem>
                     <SelectItem value="국민의힘">국민의힘</SelectItem>
                     <SelectItem value="기본소득당">기본소득당</SelectItem>
-                    <SelectItem value="국민의당">국민의당</SelectItem>
                     <SelectItem value="열린민주당">열린민주당</SelectItem>
                     <SelectItem value="미래통합당">미래통합당</SelectItem>
                     <SelectItem value="미래한국당">미래한국당</SelectItem>
@@ -78,25 +77,41 @@ export function LegislatorFilter({
               <SelectTrigger><SelectValue placeholder="전체" /></SelectTrigger>
               <SelectContent>
                     <SelectItem value="all">전체</SelectItem>
-                    <SelectItem value="과학기술정보방송통신위원회">과학기술정보방송통신위원회</SelectItem>
-                    <SelectItem value="교육위원회">교육위원회</SelectItem>
-                    <SelectItem value="국방위원회">국방위원회</SelectItem>
-                    <SelectItem value="국토교통위원회">국토교통위원회</SelectItem>
-                    <SelectItem value="국회운영위원회">국회운영위원회</SelectItem>
-                    <SelectItem value="기획재정위원회">기획재정위원회</SelectItem>
-                    <SelectItem value="농림축산식품해양수산위원회">농림축산식품해양수산위원회</SelectItem>
-                    <SelectItem value="문화체육관광위원회">문화체육관광위원회</SelectItem>
-                    <SelectItem value="법제사법위원회">법제사법위원회</SelectItem>
-                    <SelectItem value="보건복지위원회">보건복지위원회</SelectItem>
-                    <SelectItem value="산업통상자원중소벤처기업위원회">산업통상자원중소벤처기업위원회</SelectItem>
-                    <SelectItem value="여성가족위원회">여성가족위원회</SelectItem>
-                    <SelectItem value="예산결산특별위원회">예산결산특별위원회</SelectItem>
-                    <SelectItem value="외교통일위원회">외교통일위원회</SelectItem>
-                    <SelectItem value="윤리특별위원회">윤리특별위원회</SelectItem>
-                    <SelectItem value="정무위원회">정무위원회</SelectItem>
-                    <SelectItem value="정보위원회">정보위원회</SelectItem>
-                    <SelectItem value="행정안전위원회">행정안전위원회</SelectItem>
-                    <SelectItem value="환경노동위원회">환경노동위원회</SelectItem>
+                    <SelectItem value="과학기술정보방송통신위원회-과학기술원자력법안심사소위원회">과학기술정보방송통신위원회-과학기술원자력법안심사소위원회</SelectItem>
+                    <SelectItem value="과학기술정보방송통신위원회-정보통신방송법안심사소위원회">과학기술정보방송통신위원회-정보통신방송법안심사소위원회</SelectItem>
+                    <SelectItem value="교육위원회-법안심사소위원회">교육위원회-법안심사소위원회</SelectItem>
+                    <SelectItem value="국방위원회-법률안심사소위원회">국방위원회-법률안심사소위원회</SelectItem>
+                    <SelectItem value="국토교통위원회-교통법안심사소위원회">국토교통위원회-교통법안심사소위원회</SelectItem>
+                    <SelectItem value="국토교통위원회-국토법안심사소위원회">국토교통위원회-국토법안심사소위원회</SelectItem>
+                    <SelectItem value="국토교통위원회-예산결산기금심사소위원회">국토교통위원회-예산결산기금심사소위원회</SelectItem>
+                    <SelectItem value="국토교통위원회-청원심사소위원회">국토교통위원회-청원심사소위원회</SelectItem>
+                    <SelectItem value="기획재정위원회-경제재정소위원회">기획재정위원회-경제재정소위원회</SelectItem>
+                    <SelectItem value="기획재정위원회-조세소위원회">기획재정위원회-조세소위원회</SelectItem>
+                    <SelectItem value="농림축산식품해양수산위원회-농림축산식품법안심사소위원회">농림축산식품해양수산위원회-농림축산식품법안심사소위원회</SelectItem>
+                    <SelectItem value="농림축산식품해양수산위원회-해양수산법안심사소위원회">농림축산식품해양수산위원회-해양수산법안심사소위원회</SelectItem>
+                    <SelectItem value="문화체육관광위원회-문화예술법안심사소위원회">문화체육관광위원회-문화예술법안심사소위원회</SelectItem>
+                    <SelectItem value="문화체육관광위원회-청원심사소위원회">문화체육관광위원회-청원심사소위원회</SelectItem>
+                    <SelectItem value="문화체육관광위원회-체육관광법안심사소위원회">문화체육관광위원회-체육관광법안심사소위원회</SelectItem>
+                    <SelectItem value="법제사법위원회-법안심사제1소위원회">법제사법위원회-법안심사제1소위원회</SelectItem>
+                    <SelectItem value="법제사법위원회-법안심사제2소위원회">법제사법위원회-법안심사제2소위원회</SelectItem>
+                    <SelectItem value="보건복지위원회-제1법안심사소위원회">보건복지위원회-제1법안심사소위원회</SelectItem>
+                    <SelectItem value="보건복지위원회-제2법안심사소위원회">보건복지위원회-제2법안심사소위원회</SelectItem>
+                    <SelectItem value="보건복지위원회-청원심사소위원회">보건복지위원회-청원심사소위원회</SelectItem>
+                    <SelectItem value="산업통상자원중소벤처기업위원회-산업통상자원특허소위원회">산업통상자원중소벤처기업위원회-산업통상자원특허소위원회</SelectItem>
+                    <SelectItem value="산업통상자원중소벤처기업위원회-중소벤처기업소위원회">산업통상자원중소벤처기업위원회-중소벤처기업소위원회</SelectItem>
+                    <SelectItem value="산업통상자원중소벤처기업위원회-청원소위원회">산업통상자원중소벤처기업위원회-청원소위원회</SelectItem>
+                    <SelectItem value="여성가족위원회-법안심사소위원회">여성가족위원회-법안심사소위원회</SelectItem>
+                    <SelectItem value="외교통일위원회-법안심사소위원회">외교통일위원회-법안심사소위원회</SelectItem>
+                    <SelectItem value="외교통일위원회-청원심사소위원회">외교통일위원회-청원심사소위원회</SelectItem>
+                    <SelectItem value="정무위원회-법안심사제1소위원회">정무위원회-법안심사제1소위원회</SelectItem>
+                    <SelectItem value="정무위원회-법안심사제2소위원회">정무위원회-법안심사제2소위원회</SelectItem>
+                    <SelectItem value="정보위원회-법안심사소위원회">정보위원회-법안심사소위원회</SelectItem>
+                    <SelectItem value="행정안전위원회-법안심사제1소위원회">행정안전위원회-법안심사제1소위원회</SelectItem>
+                    <SelectItem value="행정안전위원회-법안심사제2소위원회">행정안전위원회-법안심사제2소위원회</SelectItem>
+                    <SelectItem value="환경노동위원회-고용노동법안심사소위원회">환경노동위원회-고용노동법안심사소위원회</SelectItem>
+                    <SelectItem value="환경노동위원회-예산결산기금심사소위원회">환경노동위원회-예산결산기금심사소위원회</SelectItem>
+                    <SelectItem value="환경노동위원회-청원심사소위원회">환경노동위원회-청원심사소위원회</SelectItem>
+                    <SelectItem value="환경노동위원회-환경법안심사소위원회">환경노동위원회-환경법안심사소위원회</SelectItem>
               </SelectContent>
             </Select>
           </FilterItem> 

@@ -14,43 +14,54 @@ import SentimentLanding from './pages/SentimentLanding.jsx'
 import PartyAnalysisPage from './pages/PartyAnalysisPage.jsx'
 import CommitteeAnalysisPage from './pages/CommitteeAnalysisPage.jsx'
 import { BillSearchPage } from './pages/BillSearchPage.jsx'
+import { BillAnalysis } from './pages/BillAnalysis.jsx'
+import { Dashboard } from './pages/Dashboard.jsx'
 
+import PrivateRoute from './components/PrivateRoute.jsx';
+import { ScrollToTop } from './components/ScrollToTop.jsx';
 
 import './index.css'
 
-
 function App() {
   const locate = useLocation();
-
-  const hideHeaderRoutes = ['/home','/login', '/register'];
+  const hideHeaderRoutes = ['/login', '/register', '/home'];
   const showHeader = !hideHeaderRoutes.includes(locate.pathname);
-
   const hideFooterRoutes = ['/login', '/register'];
   const showFooter = !hideFooterRoutes.includes(locate.pathname);
-
-
   
   return (
     <div className ="flex flex-col min-h-screen font-sans">
+      <ScrollToTop />
       {showHeader && <Header />}
       <div className="flex-1">
       <Routes>
+        {/* Mặc định vào thẳng Home */}
         <Route path="/" element={<Navigate to="/home" />} /> 
+        
+        {/* Trang Home giờ ai cũng vào được */}
+        <Route path="/home" element={<Home />} />
+
         <Route path="/login" element={<LoginForm />} />
         <Route path="/register" element={<SignupForm />} />
-        <Route path="/home" element={<Home />} />
-        <Route path="/sentimentpage" element = {<SentimentLanding/>} />               //phân tích cảm xúc chính
-        <Route path="/sentiment/member" element={<LegislatorAnalysis />} />           //phân tích nghị sĩ
-        <Route path="/analysis/person-view" element={<LegislatorDashboard />} />      // Trang hồ sơ cá nhân nghị sĩ         
-        <Route path ="/analysis/detail" element={<LegislatorBillDetail />} />        // Trang chi tiết dự luật của nghị s
-        <Route path="/sentiment/party" element={<PartyAnalysisPage/>} />             //phân tích theo đảng trang chính
-        <Route path="/sentiment/committee" element={<CommitteeAnalysisPage/>}/>      //phân tích theo ủy ban
-        <Route path="/sentiment/bill" element={<BillSearchPage/>}/>
 
-        <Route path ="/billprediction" element={<BillPrediction />} />                // Trang dự đoán dự luật
-        <Route path ="/analysis/party-members" element={<PartyBillMembers />} />  
+
         
-                 {/* Placeholder */}
+        <Route element={<PrivateRoute />}>
+            {/* Các chức năng chuyên sâu */}
+            <Route path="/sentimentpage" element = {<SentimentLanding/>} />              
+            <Route path="/sentiment/member" element={<LegislatorAnalysis />} />          
+            <Route path="/analysis/person-view" element={<LegislatorDashboard />} />         
+            <Route path ="/analysis/detail" element={<LegislatorBillDetail />} />        
+            <Route path="/sentiment/party" element={<PartyAnalysisPage/>} />             
+            <Route path="/sentiment/committee" element={<CommitteeAnalysisPage/>}/>      
+            <Route path="/sentiment/bill" element={<BillSearchPage/>}/>
+            <Route path ="/analysis/bill-view" element={<BillAnalysis />} />
+
+            <Route path ="/billprediction" element={<BillPrediction />} />               
+            <Route path ="/analysis/party-members" element={<PartyBillMembers />} />  
+            <Route path="/dashboard" element={<Dashboard />} />
+        </Route>
+
       </Routes>
       </div>
     {showFooter && <Footer />}

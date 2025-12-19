@@ -19,7 +19,7 @@ export function LegislatorSummary({ total, current }) {
             총 <span className="text-slate-900">{total}명</span>의 의원 중 / 검색결과 <span className="text-red-600 text-2xl">{current}명</span>
           </div>
           <div className="bg-blue-50 text-blue-800 px-4 py-2 rounded-md text-sm font-medium border border-blue-100">
-            조회하신 국회의원의 전체 국회의원 비중은 <span className="font-bold text-lg">{percentage}%</span> 입니다.
+            전체 국회의원 중 조회된 국회의원의 비중은 <span className="font-bold text-lg">{percentage}%</span> 입니다.
           </div>
         </div>
       </div>

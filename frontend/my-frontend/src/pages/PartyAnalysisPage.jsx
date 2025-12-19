@@ -8,7 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { useNavigate } from 'react-router-dom';
+import { Landmark } from "lucide-react"
+import { useLocation, useNavigate } from 'react-router-dom';
 
 const PARTIES = [
   { id: 106, name: "국민의힘", color: "red" },       
@@ -18,7 +19,7 @@ const PARTIES = [
   { id: 109, name: "새로운미래", color: "blue" },    
   { id: 113, name: "기본소득당", color: "teal" },    
   { id: 104, name: "미래통합당", color: "red" }, 
-  { id: 103, name: "열린민주당", color: "blue" },  
+ // { id: 103, name: "열린민주당", color: "blue" },  
   { id: 115, name: "시대전환", color: "slate" },
   { id: 108, name: "국민의당", color: "orange" },
   { id: 105, name: "미래한국당", color: "red" },
@@ -42,7 +43,15 @@ const getTheme = (color) => {
 
 
 export default function PartyAnalysisPage() {
-  const [selectedPartyId, setSelectedPartyId] = useState("106"); 
+  const location = useLocation(); 
+
+  const [selectedPartyId, setSelectedPartyId] = useState(() => {
+      if (location.state?.partyId) {
+          return location.state.partyId.toString();
+      }
+      return "101";
+  });
+
   
   // State quản lý dữ liệu API
   const [partyData, setPartyData] = useState(null);
@@ -76,17 +85,26 @@ export default function PartyAnalysisPage() {
    }, [selectedPartyId]);
 
    const handleMemberClick = (member) => {
-      const profileToPass = {
+      console.log("Member data clicked:", member); 
 
-            member_id: member.member_id, 
-            id: member.member_id,        
-            name: member.member_name, 
-            party: currentPartyInfo.name, // Lấy tên đảng hiện tại
-            score: member.cooperation_score,
-            total_speeches: member.total_speeches,
-            type: 'person' 
-      };
-      
+  
+   const realId = member.member_id || member.id || member.legislator_id;
+
+  if (!realId) {
+    alert("Lỗi: Không tìm thấy ID nghị sĩ");
+    return;
+  }
+
+  const profileToPass = {
+    member_id: realId, 
+    id: realId,         
+    name: member.member_name || member.name, // Fallback tên
+    party: currentPartyInfo.name, 
+    score: member.bayesian_score ?? member.avg_score_prob ?? 0,
+    total_speeches: member.n_speeches ?? member.total_speeches ?? 0,
+    type: 'person',
+    adjusted_stance: member.adjusted_stance
+  };
       // Chuyển trang và gửi kèm object này
       navigate('/analysis/person-view', { state: { memberProfile: profileToPass } });
    };
@@ -121,9 +139,12 @@ export default function PartyAnalysisPage() {
         {/* --- 1. HEADER & FILTER --- */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 px-6">
           <div>
-            <h1 className="text-3xl font-bold text-slate-900">정당 분석 대시보드</h1>
+            <h1 className="text-3xl font-bold text-slate-900 flex items-center gap-3">
+               <Landmark className="w-8 h-8 text-slate-700" />
+               정당분석
+            </h1>
             <p className="text-slate-500 mt-1">
-              <span className={`font-bold ${theme.text}`}>{currentPartyInfo.name}</span>의 단합도와 주요 쟁점을 분석합니다.
+              <span className={`font-bold ${theme.text}`}>{currentPartyInfo.name}</span>의 평균협력도와 주요 찬반 법안을 분석합니다.
             </p>
           </div>
           
@@ -149,81 +170,140 @@ export default function PartyAnalysisPage() {
         </div>
 
          {/* --- 2. HERO CARDS (Overview) --- */}
-         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       
-        {/* Card 1: Total Score (-1 ~ 1 Bar Chart) */}
-        <Card className={`md:col-span-2 border-l-4 ${theme.border.replace('border-', 'border-l-')} shadow-sm overflow-hidden relative bg-white`}>
-            <div className={`absolute top-0 right-0 w-40 h-40 ${theme.bg} rounded-full blur-3xl -mr-10 -mt-10 opacity-60 pointer-events-none`}></div>
+         {/* Card 1: Total Score (-1 ~ 1 Bar Chart) */}
+         <Card className="md:col-span-2 shadow-sm border-slate-200 bg-white">
+         <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-500 flex items-center gap-2">
+               <TrendingUp className="w-4 h-4"/> 정당 평균 협력도
+            </CardTitle>
+         </CardHeader>
+         
+         <CardContent className="relative z-10 pt-4">
+            {(() => {
+               // 1. Check for unavailable data
+               const isUnavailable = partyData.total_cooperation?.status === '분석 불가';
+               
+               if (isUnavailable) {
+               return (
+                  <div className="flex flex-col items-center justify-center py-8 space-y-3 min-h-[140px]">
+                     <AlertCircle className="w-10 h-10 text-slate-300" />
+                     <div className="text-center">
+                     <p className="text-base font-bold text-slate-600">분석 데이터 부족</p>
+                     <p className="text-xs text-slate-400 mt-1">
+                        {partyData.total_cooperation?.message || '협력도를 산출할 충분한 데이터가 없습니다.'}
+                     </p>
+                     </div>
+                  </div>
+               );
+               }
+               
+               // 2. Data Processing (Raw Score)
+               const rawScore = partyData.total_cooperation?.adjusted_score_prob ?? 
+                              partyData.total_cooperation?.avg_score_prob ?? 0;
+               
+               // Progress Bar Calculation
+               const percentage = Math.min(100, Math.max(0, (rawScore + 0.5) * 100));
 
-            <CardHeader className="pb-2 relative z-10">
-               <CardTitle className="text-sm font-medium text-slate-500 flex items-center gap-2">
-               <BarChart3 className={`w-4 h-4 ${theme.text}`} /> 정당 총 협력도 점수 
-               </CardTitle>
-            </CardHeader>
-            <CardContent className="relative z-10">
-               {(() => {
-                   const rawScore = partyData.total_cooperation ?? 0;
-                   const clampedScore = Math.max(-1, Math.min(1, rawScore));
-                   // Chuyển đổi -1~1 sang 0~100%
-                   const percentage = ((clampedScore + 1) / 2) * 100;
+               // 3. Status Label (Directly from Backend)
+               const adjusted_stance = partyData.total_cooperation?.adjusted_stance || '중립';
 
-                   return (
-                    <>
-                        {/* Hiển thị số liệu thực (Raw Data) */}
-                        <div className="flex items-end gap-3">
-                            <div className={`text-5xl font-bold tracking-tight ${
-                                rawScore > 0 ? theme.text : (rawScore < 0 ? 'text-slate-600' : 'text-slate-400')
-                            }`}>
-                                {/* Giữ nguyên rawScore, chỉ thêm dấu + nếu dương */}
-                                {rawScore > 0 ? `+${rawScore}` : rawScore}
-                            </div>
-                            <span className="text-lg text-slate-400 font-medium mb-1.5">/ 1.0</span>
-                        </div>
-                        
-                        {/* Thanh Bar (Left-to-Right) */}
-                        <div className="relative w-full h-6 mt-6">
-                            <div className="absolute top-0 left-0 w-full h-full bg-slate-100 rounded-full overflow-hidden">
-                                <div className="absolute top-0 left-1/2 w-0.5 h-full bg-white/50 z-10 border-l border-slate-300 border-dashed"></div>
-                            </div>
-                            
-                            <div 
-                                className={`absolute top-0 left-0 h-full rounded-full transition-all duration-1000 ease-out flex items-center justify-end pr-1 ${theme.bar}`}
-                                style={{ width: `${percentage}%` }}
-                            >
-                                <div className="w-2 h-2 bg-white rounded-full shadow-sm opacity-80"></div>
-                            </div>
-                        </div>
-                        
-                        <div className="flex justify-between text-[10px] text-slate-400 mt-2 font-mono px-1">
-                            <span>-1.0 (비협력)</span>
-                            <span className="pl-2">0 (중립)</span>
-                            <span>+1.0 (협력)</span>
-                        </div>
-                        
-                        <p className="text-xs text-slate-400 mt-2">
-                        소속 의원들의 발언을 종합적으로 분석한 평균 지표입니다.
-                        </p>
-                    </>
-                   );
-               })()}
-            </CardContent>
-         </Card>
+               // 4. Color Mapping
+               const COLOR_MAP = {
+               '협력': {
+                  badge: 'bg-blue-50 text-blue-700 border-blue-200',
+                  text: 'text-blue-700',
+                  bar: 'bg-blue-600'
+               },
+               '비협력': {
+                  badge: 'bg-red-50 text-red-700 border-red-200',
+                  text: 'text-red-700',
+                  bar: 'bg-red-600'
+               },
+               '중립': {
+                  badge: 'bg-slate-100 text-slate-600 border-slate-200',
+                  text: 'text-slate-700',
+                  bar: 'bg-slate-400'
+               }
+               };
+               
 
-         {/* Card 2: Analyzed Count */}
-         <Card className="md:col-span-1 shadow-sm bg-slate-900 text-white border-none relative overflow-hidden">
-            <div className="absolute -right-6 -top-6 w-24 h-24 bg-white/10 rounded-full blur-2xl pointer-events-none"></div>
-            
-            <CardHeader className="pb-2 relative z-10">
-               <CardTitle className="text-sm font-medium text-slate-300 flex items-center gap-2">
-               <Users className="w-4 h-4 text-slate-400"/> 분석 대상 의원수
-               </CardTitle>
-            </CardHeader>
-            <CardContent className="relative z-10">
-               <div className="text-4xl font-bold flex items-end gap-2 mt-2">
-               {partyData.analyzed_members} <span className="text-lg text-slate-400 font-normal mb-1">명</span>
+               // FIX: Use 'adjusted_stance' here, not 'backendStance'
+               const styles = COLOR_MAP[adjusted_stance] || COLOR_MAP['중립'];
+               
+
+               return (
+               <div className="flex flex-col h-full justify-between">
+                     
+                     {/* Top: Score (Left) and Badge (Right) */}
+                     <div className="flex items-start justify-between mb-6">
+                     <div className="flex flex-col">
+                        <div className={`text-5xl font-extrabold tracking-tight flex items-baseline ${styles.text}`}>
+                           {rawScore > 0 ? `${rawScore.toFixed(8)}` : rawScore.toFixed(8)}
+                           <span className="text-sm font-medium text-slate-400 ml-2 tracking-normal">/ 1.0</span>
+                        </div>
+                     </div>
+                        
+                     <div className={`px-3 py-1.5 rounded-full border text-xs font-bold shadow-sm ${styles.badge}`}>
+                        {adjusted_stance}
+
+                     </div>
+                     
+                     </div>
+                     
+                     {/* Bottom: Progress Bar */}
+                     <div>
+                     <div className="relative w-full h-4 bg-slate-100 rounded-full overflow-hidden border border-slate-100">
+                        {/* Center Line (0 point) */}
+                        <div className="absolute top-0 left-1/2 w-px h-full bg-slate-400/50 z-10 border-l border-dashed"></div>
+                        
+                        {/* Data Bar */}
+                        <div 
+                           className={`absolute top-0 left-0 h-full rounded-full transition-all duration-1000 ease-out flex items-center justify-end pr-0.5 ${styles.bar}`}
+                           style={{ width: `${percentage}%` }}
+                        >
+                           <div className="w-1.5 h-1.5 bg-white rounded-full opacity-80 shadow-sm"></div>
+                        </div>
+                     </div>
+                     
+                     {/* Tick Labels */}
+                     <div className="flex justify-between text-[10px] text-slate-400 mt-2 font-mono px-0.5">
+                        <span>-1 (비협력)</span>
+                        <span className="text-slate-300">0</span>
+                        <span>1 (협력)</span>
+                     </div>
+                     
+                     <p className="text-xs text-slate-400 mt-3 leading-relaxed">
+                        * 소속 의원들의 법안에 대한 발언을 종합 분석한 평균협력도 지표입니다.
+                     </p>
+                     </div>
                </div>
-               <p className="text-xs text-slate-500 mt-4">
-               현재 국회 등록된 해당 정당 의원 수
+               );
+            })()}
+         </CardContent>
+         </Card>
+  
+         {/* Card 2: Analyzed Count */}
+         <Card className="md:col-span-1 shadow-sm bg-slate-900 text-white border-none relative overflow-hidden flex flex-col justify-center">
+            {/* 배경 장식 효과 */}
+            <div className="absolute -right-6 -top-6 w-32 h-32 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
+            
+            <CardHeader className="pb-1 relative z-10">
+               <CardTitle className="text-sm font-medium text-slate-300 flex items-center gap-2">
+               <Users className="w-4 h-4 text-slate-400"/> 조회된 의원 수
+               </CardTitle>
+            </CardHeader>
+            <CardContent className="relative z-10 pb-8">
+               <div className="text-5xl font-bold flex items-baseline gap-2 mt-1">
+               {partyData.analyzed_members} 
+               <span className="text-lg text-slate-400 font-normal">명</span>
+               </div>
+               <div className="w-full h-1 bg-slate-800 rounded-full mt-4 mb-2 overflow-hidden">
+                  <div className="h-full bg-slate-500 w-2/3 rounded-full"></div>
+               </div>
+               <p className="text-xs text-slate-500">
+               발언 데이터 기반 의원 수
                </p>
             </CardContent>
          </Card>
@@ -242,13 +322,16 @@ export default function PartyAnalysisPage() {
                           <ThumbsUp className={`w-5 h-5 ${theme.text}`} />
                           협력파 의원 Top 5
                        </CardTitle>
-                       <CardDescription>법안에 가장 긍정적인 발언을 한 의원</CardDescription>
+                       <CardDescription>법안심사 중 가장 협력적인 발언을 한 의원</CardDescription>
                     </div>
                  </div>
               </CardHeader>
               <CardContent className="pt-6">
                  <div className="space-y-4">
-                    {partyData.member_top5 && partyData.member_top5.map((member, idx) => (
+                    {partyData.member_top5 && partyData.member_top5
+                        
+                        .filter(member => (member.bayesian_score ?? member.avg_score_prob ?? 0) > 0.01)
+                        .map((member, idx) => (
                        <div key={idx} 
                         className="flex items-center justify-between group p-2 rounded-lg hover:bg-slate-100 cursor-pointer transition-all duration-200"
                         onClick={() => handleMemberClick(member)}
@@ -261,7 +344,7 @@ export default function PartyAnalysisPage() {
                           </div>
                           {/* Điểm thô */}
                           <Badge variant="outline" className={`${theme.bg} ${theme.text} ${theme.border} font-bold px-3 py-1`}>
-                          {member.cooperation_score}
+                          {(member.bayesian_score ?? member.avg_score_prob ?? 0).toFixed(3)}
                           </Badge>
                        </div>
                     ))}
@@ -279,13 +362,16 @@ export default function PartyAnalysisPage() {
                           <AlertCircle className="w-5 h-5 text-slate-500" />
                           비협력/소신파 의원 Top 5
                        </CardTitle>
-                       <CardDescription>당론과 다르거나 비판적인 의견을 제시한 의원</CardDescription>
+                       <CardDescription>법안 심사 중 가장 비협력적인 발언을 한 의원</CardDescription>
                     </div>
                  </div>
               </CardHeader>
               <CardContent className="pt-6">
                  <div className="space-y-4">
-                    {partyData.member_bottom5 && partyData.member_bottom5.map((member, idx) => (
+                    {partyData.member_bottom5 && partyData.member_bottom5
+                        
+                        .filter(member => (member.bayesian_score ?? member.avg_score_prob ?? 0) < -0.02)
+                        .map((member, idx) => (
                        <div key={idx}
                         className="flex items-center justify-between group p-2 rounded-lg hover:bg-slate-100 cursor-pointer transition-all duration-200"
                         onClick={() => handleMemberClick(member)}
@@ -298,7 +384,7 @@ export default function PartyAnalysisPage() {
                           </div>
                           {/* Điểm thô */}
                           <Badge variant="secondary" className="bg-slate-100 text-slate-600 font-bold px-3 py-1">
-                          {member.cooperation_score}
+                          {(member.bayesian_score ?? member.avg_score_prob ?? 0).toFixed(3)}
                           </Badge>
                        </div>
                     ))}
@@ -320,8 +406,10 @@ export default function PartyAnalysisPage() {
               {/* 찬성(협력) */}
               <div className="space-y-4">
                  <h3 className={`font-bold text-lg flex items-center gap-2 ${theme.text}`}>
-                    <ThumbsUp className="w-5 h-5"/> 적극 추진 (찬성 우세)
+                    <ThumbsUp className="w-5 h-5"/> 적극 찬성 (협력 우세)
                  </h3>
+
+                 
                  {partyData.bill_top5 && partyData.bill_top5.map((bill) => (
                     <Card key={bill.bill_id} 
                    onClick={()=>handleBillClick(bill.bill_name)}
@@ -332,7 +420,9 @@ export default function PartyAnalysisPage() {
                           </div>
                           <div className="text-right">
                              {/* Điểm thô */}
-                             <span className={`block font-bold text-lg ${theme.text}`}>{bill.cooperation_score}</span>
+                             <span className={`block font-bold text-lg ${theme.text}`}>
+                                {(bill.bayesian_score ?? bill.avg_score_prob ?? 0).toFixed(3)}
+                             </span>
                              <span className="text-[10px] text-slate-400">협력도</span>
                           </div>
                        </CardContent>
@@ -344,7 +434,7 @@ export default function PartyAnalysisPage() {
               {/* 반대(비협력) */}
               <div className="space-y-4">
                  <h3 className="font-bold text-lg flex items-center gap-2 text-slate-600">
-                    <ThumbsDown className="w-5 h-5"/> 주요 반대 (비협력 우세)
+                    <ThumbsDown className="w-5 h-5"/> 적극 반대 (비협력 우세)
                  </h3>
                  {partyData.bill_bottom5 && partyData.bill_bottom5.map((bill) => (
                     <Card key={bill.bill_id} 
@@ -357,7 +447,9 @@ export default function PartyAnalysisPage() {
                           </div>
                           <div className="text-right">
                              {/* Điểm thô */}
-                             <span className="block font-bold text-lg text-slate-600">{bill.cooperation_score}</span>
+                             <span className="block font-bold text-lg text-slate-600">
+                                {(bill.bayesian_score ?? bill.avg_score_prob ?? 0).toFixed(3)}
+                             </span>
                              <span className="text-[10px] text-slate-400">협력도</span>
                           </div>
                        </CardContent>

@@ -3,23 +3,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
+import re
 import schemas 
 from database import supabase 
 import random 
 from fastapi import FastAPI, Depends, HTTPException, status, Query, APIRouter
 import pandas as pd
 from build_member_stats import build_member_stats
-from build_party_total_score import build_party_total_score
-from build_party_member_ranking import build_party_member_ranking
-from build_party_bill_ranking import build_party_bill_ranking
 from sqlalchemy.orm import Session
 from util_common import compute_score_prob, compute_speech_length
-from predict_bill_pass_probability import predict_bill_pass_probability
+from predict_bill_pass_probability2 import predict_bill_pass_probability
 import ast
 from pydantic import BaseModel
 
 TABLE_PREVIEW_NAMES = [
+    "bill_detail_score",
+    "bill_member_score",
+    "bill_party_score",
     "bills",
+    "committee_bill_ranking",
+    "committee_member_ranking",
+    "committee_total_score",
     "committees",
     "committees_history",
     "dimension",
@@ -28,6 +32,9 @@ TABLE_PREVIEW_NAMES = [
     "member_stats",
     "parties",
     "parties_history",
+    "party_bill_ranking",
+    "party_member_ranking_unique",
+    "party_total_score",
     "speeches",
 ]
 
@@ -256,66 +263,7 @@ def _fetch_table_paginated(table_name: str, select_cols: str = "*", batch_size: 
     return all_data
 
 
-def _load_party_tables():
-    """
-    정당 분석용 Supabase 테이블을 효율적으로 로드.
-    
-    - dimension: 필요한 컬럼만 선택 (member_id, party)
-    - parties: 전체 (작은 테이블)
-    - speeches: 필요한 컬럼만 선택 (member_id, score_prob, speech_id)
-    - member_bill_stats: 전체 (중간 테이블)
-    - bills: 필요한 컬럼만 선택 (bill_id, bill_name)
-    """
-    tables = {}
-    
-    # 1. dimension: member_id, party만 필요
-    try:
-        tables["dimension"] = _fetch_table_paginated(
-            "dimension",
-            select_cols="member_id, party",
-            max_batches=None
-        )
-        print(f"[SUCCESS] dimension 로드: {len(tables['dimension'])} 행")
-    except Exception as e:
-        print(f"[ERROR] dimension 로드 실패: {e}")
-        tables["dimension"] = []
-    
-    # 2. parties: 작은 테이블이므로 전체 로드
-    try:
-        tables["parties"] = _fetch_table("parties")
-        print(f"[SUCCESS] parties 로드: {len(tables['parties'])} 행")
-    except Exception as e:
-        print(f"[ERROR] parties 로드 실패: {e}")
-        tables["parties"] = []
-    
-    # 3. speeches: 필요한 컬럼만 선택 (member_id, score_prob, speech_id)
-    try:
-        tables["speeches"] = _fetch_table_paginated(
-            "speeches",
-            select_cols="member_id, score_prob, speech_id",
-            max_batches=None
-        )
-        print(f"[SUCCESS] speeches 로드: {len(tables['speeches'])} 행")
-    except Exception as e:
-        print(f"[ERROR] speeches 로드 실패: {e}")
-        tables["speeches"] = []
-    
-    # 4. member_bill_stats: 필요한 컬럼만 선택
-    try:
-        tables["member_bill_stats"] = _fetch_table_paginated(
-            "member_bill_stats",
-            select_cols="member_id, bill_id, score_prob_mean, n_speeches, stance",
-            max_batches=None
-        )
-        print(f"[SUCCESS] member_bill_stats 로드: {len(tables['member_bill_stats'])} 행")
-    except Exception as e:
-        print(f"[ERROR] member_bill_stats 로드 실패: {e}")
-        tables["member_bill_stats"] = []
-    
-    # Note: we no longer fetch `speeches` or `bills` here. downstream
-    # ranking functions now use `member_bill_stats` and `dimension`.
-    
-    return tables
+
 
 
 
@@ -331,6 +279,39 @@ def get_all_legislators():
         response = supabase.table('dimension').select("*").execute()
         data = response.data or []
 
+        # 최신 정당 정보 매핑 (parties_history 기준 최신 start_date)
+        latest_party_map = {}
+        try:
+            ph_res = supabase.table("parties_history").select("member_id, party_name, party_id, start_date").execute()
+            ph_rows = ph_res.data or []
+
+            from datetime import datetime
+
+            def _parse_dt(val):
+                if not val:
+                    return None
+                try:
+                    # 'YYYY-MM-DD' 또는 ISO 형식 모두 처리
+                    return datetime.fromisoformat(str(val).split("T")[0])
+                except Exception:
+                    return None
+
+            for row in ph_rows:
+                mid = row.get("member_id")
+                if mid is None:
+                    continue
+                start_dt = _parse_dt(row.get("start_date")) or datetime.min
+                prev = latest_party_map.get(mid)
+                if (not prev) or (start_dt > prev["start"]):
+                    latest_party_map[mid] = {
+                        "party_name": row.get("party_name") or row.get("party"),
+                        "party_id": row.get("party_id"),
+                        "start": start_dt,
+                    }
+        except Exception as e:
+            print("WARN: failed to build party_history map:", e)
+            latest_party_map = {}
+
         results = []
         for item in data:
             # 🔹 primary key dùng lại cho cả id & member_id
@@ -345,16 +326,79 @@ def get_all_legislators():
                 c_id = None
 
             committee_name = id_to_name_map.get(c_id) or "소속 위원회 없음"
+            
+            # 나이 계산 (birth_date가 있으면 사용, 없으면 "-" 반환)
+            birth_date = item.get("birth_date")
+            age_group = "-"
+            if birth_date:
+                try:
+                    from datetime import datetime
+                    birth_year = int(birth_date[:4])
+                    current_year = datetime.now().year
+                    age = current_year - birth_year
+                    
+                    if age < 30:
+                        age_group = "u30"  # 30세 미만
+                    elif age < 40:
+                        age_group = "u40"  # 30대
+                    elif age < 50:
+                        age_group = "u50"  # 40대
+                    elif age < 60:
+                        age_group = "u60"  # 50대
+                    elif age < 70:
+                        age_group = "u70"  # 60대
+                    else:
+                        age_group = "o70"  # 70세 이상
+                except Exception:
+                    age_group = "-"
+
+            latest_party = latest_party_map.get(member_pk)
+            party_name = latest_party.get("party_name") if latest_party else item.get("party")
+
+            # 당선 횟수를 문자열 형식으로 변환 (1→"초선", 2→"재선", 3→"3선" 등)
+            elected_count_raw = item.get("elected_time") or item.get("elected_count")
+            count_str = "초선"  # 기본값
+            if elected_count_raw is not None:
+                try:
+                    count_num = int(elected_count_raw)
+                    if count_num == 1:
+                        count_str = "초선"
+                    elif count_num == 2:
+                        count_str = "재선"
+                    elif count_num >= 6:
+                        count_str = "6선"
+                    else:
+                        count_str = f"{count_num}선"
+                except Exception:
+                    count_str = str(elected_count_raw) if elected_count_raw else "초선"
+
+            # 지역구 파싱: region을 city와 district로 분리
+            # 예: "경남 창원시의창구" → city: "경남", district: "창원시의창구"
+            region_full = item.get("district") or item.get("region") or "비례대표"
+            city = "비례대표"
+            district = None
+            
+            if region_full and region_full != "비례대표":
+                parts = region_full.split(None, 1)  # 첫 공백 기준으로 분리
+                if len(parts) == 2:
+                    city = parts[0]      # "경남", "경기", "서울" 등
+                    district = parts[1]  # "창원시의창구", "안성시" 등
+                elif len(parts) == 1:
+                    city = parts[0]
+                    district = None
 
             results.append({
                 "id": member_pk,          
                 "member_id": member_pk,  
                 "name": item.get("name"),
-                "party": item.get("party"),
-                "region": item.get("district") or item.get("region") or "비례대표",
+                "party": party_name,
+                "region": region_full,
+                "city": city,
+                "district": district,
                 "committee": committee_name,
                 "gender": item.get("gender", "-"),
-                "count": item.get("elected_time") or item.get("elected_count") or "초선",
+                "age": age_group,
+                "count": count_str,
                 "method": item.get("elected_type") or item.get("election_method") or "지역구",
                 "score": score
             })
@@ -372,8 +416,8 @@ def get_all_legislators():
 def get_filters():
     try:
         # 1. Lấy danh sách Tên Ủy ban trực tiếp từ bảng 'committees'
-        com_res = supabase.table('committees').select("name").execute()
-        committee_names = sorted([c['name'] for c in com_res.data if c.get('name')])
+        com_res = supabase.table('committees').select("committee").execute()
+        committee_names = sorted([c['committee'] for c in com_res.data if c.get('committee')])
 
         # 2. Lấy các thông tin khác từ bảng 'dimension'
         # Dùng select("*") cho an toàn, tránh lỗi nếu sai tên cột (ví dụ 'district' vs 'region')
@@ -395,10 +439,11 @@ def get_filters():
 
         return {
             "parties": get_unique_values(['party']),
-            "committees": committee_names, # Danh sách tên ủy ban đầy đủ lấy từ bảng committees
+            "committees": committee_names,
             "genders": get_unique_values(['gender']),
-            "regions": get_unique_values(['district', 'region']), # Thử cả 2 tên cột
-            "counts": ["초선", "재선", "3선", "4선", "5선", "6선"], 
+            "regions": get_unique_values(['district', 'region']),
+            "counts": ["초선", "재선", "3선", "4선", "5선", "6선"],
+            "ages": ["u30", "u40", "u50", "u60", "u70", "o70"],
             "methods": ["지역구", "비례대표"],
         }
     except Exception as e:
@@ -406,7 +451,7 @@ def get_filters():
         # Trả về mảng rỗng để FE không bị crash
         return {
             "parties": [], "committees": [], "genders": [], 
-            "regions": [], "counts": [], "methods": []
+            "regions": [], "counts": [], "ages": [], "methods": []
         }
     
 
@@ -422,137 +467,120 @@ def get_party_summary(party_id: int):
       - 정당 주요 법안 찬성 상위/하위 5개
     """
     try:
-        tables = _load_party_tables()
-
-        # Ensure we have parties list to map id<->name
-        parties_list = tables.get("parties", []) or []
-        party_id_map = {}
-        party_name_map = {}
-        for p in parties_list:
-            pid = p.get("id") or p.get("party_id") or p.get("partyId")
-            pname = p.get("party_name") or p.get("name") or p.get("party")
-            if pid is not None and pname:
-                try:
-                    party_id_map[int(pid)] = pname
-                    party_name_map[pname] = int(pid)
-                except Exception:
-                    party_id_map[pid] = pname
-
-        # Try to get party_name from parties table; fallback to None
-        party_name = party_id_map.get(party_id)
-
-        # If speeches are needed by build functions, fetch on-demand
-        if not tables.get("speeches"):
-            try:
-                resp = (
-                    supabase.table("speeches").select("member_id, score_prob, speech_id, bill_numbers").execute()
-                )
-                tables["speeches"] = resp.data or []
-                print(f"[INFO] on-demand speeches 로드: {len(tables['speeches'])} 행")
-            except Exception as e:
-                print("[WARN] on-demand speeches 로드 실패:", e)
-                tables["speeches"] = []
-
-        # 1) 정당 총 협력도 (build_party_total_score expects 'speeches')
-        party_total = build_party_total_score(tables)
-
-        # attach party_id to party_total if possible
-        if "party_name" in party_total.columns:
-            party_total["party_id"] = party_total["party_name"].map(party_name_map)
-
-        # find target party row
-        if party_name is not None:
-            target_party = party_total[party_total["party_name"] == party_name]
-        else:
-            # try matching by mapped party_id column
-            if "party_id" in party_total.columns:
-                target_party = party_total[party_total["party_id"] == party_id]
-            else:
-                target_party = pd.DataFrame()
-
-        if target_party.empty:
+        # 1. parties 테이블에서 party_name 조회
+        party_res = supabase.table("parties").select("party_name").eq("party_id", party_id).execute()
+        if not party_res.data:
             raise HTTPException(status_code=404, detail="정당을 찾을 수 없습니다.")
+        
+        party_name = party_res.data[0].get("party_name")
 
-        party_row = target_party.iloc[0].to_dict()
-        # ensure party_name variable exists
-        party_name = party_row.get("party_name") or party_name or f"party-{party_id}"
-
-        # 2) 정당별 의원 협력도 랭킹
-        member_rank = build_party_member_ranking(tables)
-        # filter by party_name (member_rank uses 'party_name')
-        party_members = member_rank[member_rank.get("party_name") == party_name]
-
-        # ensure member_id is clean and analyzed_members is number of unique members
+        # 2. party_total_score 테이블에서 정당 총 협력도 조회
+        total_cooperation = None
+        analyzed_members = 0
+        
         try:
-            party_members["member_id"] = party_members["member_id"].apply(lambda x: int(x) if pd.notna(pd.to_numeric(x, errors='coerce')) else x)
-        except Exception:
-            pass
+            total_score_res = supabase.table("party_total_score").select("*").eq("party_name", party_name).execute()
+            if total_score_res.data:
+                party_row = total_score_res.data[0]
+                total_cooperation = {
+                    "avg_score_prob": party_row.get("avg_score_prob"),
+                    "adjusted_score_prob": party_row.get("adjusted_score_prob"),
+                    "original_stance": party_row.get("original_stance"),
+                    "adjusted_stance": party_row.get("adjusted_stance"),
+                }
+                analyzed_members = party_row.get("n_members", 0)
+            else:
+                total_cooperation = {
+                    "status": "분석 불가",
+                    "message": "정당 협력도 데이터가 없습니다."
+                }
+        except Exception as e:
+            print(f"WARN: party_total_score 조회 실패: {e}")
+            total_cooperation = {
+                "status": "분석 불가",
+                "message": "정당 협력도 데이터 조회 중 오류가 발생했습니다."
+            }
 
-        member_top5 = (
-            party_members.sort_values("bayesian_score", ascending=False)
-            .head(5)
-            .loc[:, ["member_id", "member_name", "bayesian_score", "avg_score_prob", "rank_total", "original_stance", "adjusted_stance"]]
-            .to_dict(orient="records")
-        )
-        member_bottom5 = (
-            party_members.sort_values("bayesian_score", ascending=True)
-            .head(5)
-            .loc[:, ["member_id", "member_name", "bayesian_score", "avg_score_prob", "rank_total", "original_stance", "adjusted_stance"]]
-            .to_dict(orient="records")
-        )
-
-        # analyzed_members: verify using unique member_id count
+        # 3. party_member_ranking_unique 테이블에서 의원 랭킹 조회
+        member_top5 = []
+        member_bottom5 = []
+        
         try:
-            analyzed_members_count = int(party_members["member_id"].nunique())
-        except Exception:
-            analyzed_members_count = len(party_members)
+            member_rank_res = supabase.table("party_member_ranking_unique").select("*").eq("party_name", party_name).execute()
+            party_members = member_rank_res.data or []
 
-        # 3) 정당별 법안 협력도 랭킹
-        bill_rank = build_party_bill_ranking(tables)
-        party_bills = bill_rank[bill_rank.get("party_name") == party_name]
+            if party_members:
+                # 상위 5명
+                member_top5 = sorted(party_members, key=lambda x: x.get("bayesian_score", 0), reverse=True)[:5]
+                # 하위 5명
+                member_bottom5 = sorted(party_members, key=lambda x: x.get("bayesian_score", 0))[:5]
+                
+                # analyzed_members가 아직 0이면 party_members 수로 설정
+                if analyzed_members == 0:
+                    analyzed_members = len(party_members)
+        except Exception as e:
+            print(f"WARN: party_member_ranking_unique 조회 실패: {e}")
 
-        # Normalize bill columns to expected keys (bill_id) for compatibility
-        if not party_bills.empty:
-            party_bills = party_bills.copy()
-            if "bill_number" in party_bills.columns and "bill_id" not in party_bills.columns:
-                party_bills["bill_id"] = party_bills["bill_number"]
-            if "bill_name" not in party_bills.columns and "bill_name" in party_bills.columns:
-                party_bills["bill_name"] = party_bills["bill_name"]
+        # 4. party_bill_ranking 테이블에서 법안 랭킹 조회
+        bill_top5 = []
+        bill_bottom5 = []
+        
+        try:
+            bill_rank_res = supabase.table("party_bill_ranking").select("*").eq("party_name", party_name).execute()
+            party_bills = bill_rank_res.data or []
 
-            # try to fill missing bill_name from tables['bills'] mapping if available
-            bills_tbl = tables.get("bills") or []
-            if bills_tbl:
-                bills_map = {str(b.get("bill_id")): b.get("bill_name") for b in bills_tbl}
-                if "bill_name" not in party_bills.columns:
-                    party_bills["bill_name"] = party_bills["bill_id"].astype(str).map(bills_map)
-                else:
-                    party_bills["bill_name"] = party_bills["bill_name"].fillna(party_bills["bill_id"].astype(str).map(bills_map))
-                # final fallback: use bill_id as name
-                party_bills["bill_name"] = party_bills["bill_name"].fillna(party_bills["bill_id"].astype(str))
-
-        bill_top5 = (
-            party_bills.sort_values("bayesian_score", ascending=False)
-            .head(5)
-            .loc[:, [c for c in ["bill_id", "bill_name", "speech_count", "avg_score_prob", "bayesian_score", "rank_in_party"] if c in party_bills.columns]]
-            .to_dict(orient="records")
-        )
-        bill_bottom5 = (
-            party_bills.sort_values("bayesian_score", ascending=True)
-            .head(5)
-            .loc[:, [c for c in ["bill_id", "bill_name", "speech_count", "avg_score_prob", "bayesian_score", "rank_in_party"] if c in party_bills.columns]]
-            .to_dict(orient="records")
-        )
+            if party_bills:
+                # 같은 이름의 법안을 하나로 통합 (가장 높은 bayesian_score 사용)
+                bill_name_map = {}
+                for bill in party_bills:
+                    bill_name = bill.get("bill_name")
+                    if not bill_name:
+                        continue
+                    
+                    current_score = bill.get("bayesian_score", 0)
+                    
+                    if bill_name not in bill_name_map:
+                        bill_name_map[bill_name] = bill
+                    else:
+                        # 기존 법안보다 점수가 높으면 교체
+                        existing_score = bill_name_map[bill_name].get("bayesian_score", 0)
+                        if current_score > existing_score:
+                            bill_name_map[bill_name] = bill
+                
+                # 통합된 법안 리스트
+                unique_bills = list(bill_name_map.values())
+                
+                # 점수로 정렬 (내림차순/오름차순)
+                sorted_desc = sorted(unique_bills, key=lambda x: x.get("bayesian_score", 0), reverse=True)
+                sorted_asc = sorted(unique_bills, key=lambda x: x.get("bayesian_score", 0))
+                
+                # 상위 5개 (같은 점수는 하나만 포함)
+                prev_score = None
+                for bill in sorted_desc:
+                    current_score = bill.get("bayesian_score", 0)
+                    if prev_score is None or current_score != prev_score:
+                        bill_top5.append(bill)
+                        prev_score = current_score
+                        if len(bill_top5) >= 5:
+                            break
+                
+                # 하위 5개 (같은 점수는 하나만 포함)
+                prev_score = None
+                for bill in sorted_asc:
+                    current_score = bill.get("bayesian_score", 0)
+                    if prev_score is None or current_score != prev_score:
+                        bill_bottom5.append(bill)
+                        prev_score = current_score
+                        if len(bill_bottom5) >= 5:
+                            break
+        except Exception as e:
+            print(f"WARN: party_bill_ranking 조회 실패: {e}")
 
         return {
             "party_id": party_id,
             "party_name": party_name,
-            "total_cooperation": {
-                "avg_score_prob": party_row.get("avg_score_prob"),
-                "adjusted_score_prob": party_row.get("adjusted_score_prob"),
-                "original_stance": party_row.get("original_stance"),
-                "adjusted_stance": party_row.get("adjusted_stance"),
-            },
-            "analyzed_members": len(party_members),
+            "total_cooperation": total_cooperation,
+            "analyzed_members": analyzed_members,
             "member_top5": member_top5,
             "member_bottom5": member_bottom5,
             "bill_top5": bill_top5,
@@ -586,13 +614,9 @@ def get_parties_total_score():
       - adjusted_score_prob: 보정된 협력도 점수 (baseline 중심)
     """
     try:
-        tables = _load_party_tables()
-        
-        # party_total_score 계산
-        party_scores = build_party_total_score(tables)
-        
-        # DataFrame을 list of dict로 변환
-        result = party_scores.to_dict(orient="records")
+        # party_total_score 테이블에서 직접 조회
+        response = supabase.table("party_total_score").select("*").execute()
+        result = response.data or []
         
         return {
             "count": len(result),
@@ -601,7 +625,7 @@ def get_parties_total_score():
     
     except Exception as e:
         print("Error in get_parties_total_score:", e)
-        raise HTTPException(status_code=500, detail=f"정당 협력도 계산 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"정당 협력도 조회 중 오류: {str(e)}")
 
     
 @app.get("/api/parties/member-ranking")
@@ -610,13 +634,13 @@ def get_parties_member_ranking():
     모든 정당의 의원별 협력도(베이시안 보정 포함) 랭킹을 반환한다.
     """
     try:
-        tables = _load_party_tables()
-        df = build_party_member_ranking(tables)
-        result = df.to_dict(orient="records")
+        # party_member_ranking_unique 테이블에서 직접 조회
+        response = supabase.table("party_member_ranking_unique").select("*").execute()
+        result = response.data or []
         return {"count": len(result), "members": result}
     except Exception as e:
         print("Error in get_parties_member_ranking:", e)
-        raise HTTPException(status_code=500, detail=f"정당별 의원 랭킹 계산 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"정당별 의원 랭킹 조회 중 오류: {str(e)}")
 
 
 @app.get("/api/parties/bill-ranking")
@@ -625,13 +649,13 @@ def get_parties_bill_ranking():
     모든 정당의 법안별 협력도 랭킹을 반환한다.
     """
     try:
-        tables = _load_party_tables()
-        df = build_party_bill_ranking(tables)
-        result = df.to_dict(orient="records")
+        # party_bill_ranking 테이블에서 직접 조회
+        response = supabase.table("party_bill_ranking").select("*").execute()
+        result = response.data or []
         return {"count": len(result), "bills": result}
     except Exception as e:
         print("Error in get_parties_bill_ranking:", e)
-        raise HTTPException(status_code=500, detail=f"정당별 법안 랭킹 계산 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"정당별 법안 랭킹 조회 중 오류: {str(e)}")
 
 
 # ==========================================
@@ -877,6 +901,34 @@ def get_legislator_bills(member_id: int):
                 print("Error fetching bill names in get_legislator_bills:", e)
         # ---------------------------------------------------------
 
+        # ---------------------------------------------------------
+        # [추가] 3️⃣ bill_member_score 테이블에서 bayesian_score, adjusted_stance 가져오기
+        # ---------------------------------------------------------
+        bill_member_score_map: dict[tuple, dict] = {}  # (member_id, bill_number:str) -> {bayesian_score, adjusted_stance}
+        
+        if valid_bill_ids:
+            try:
+                score_res = (
+                    supabase.table("bill_member_score")
+                    .select("member_id, bill_number, avg_score_prob, adjusted_stance")
+                    .eq("member_id", member_id)
+                    .in_("bill_number", valid_bill_ids)
+                    .execute()
+                )
+                
+                for item in (score_res.data or []):
+                    bid_norm = str(item.get("bill_number")).strip() if item.get("bill_number") is not None else None
+                    key = (item.get("member_id"), bid_norm)
+                    bill_member_score_map[key] = {
+                        "avg_score_prob": item.get("avg_score_prob"),
+                        "adjusted_stance": item.get("adjusted_stance")
+                    }
+                
+                print("DEBUG fetched bill_member_score count =", len(bill_member_score_map))
+            except Exception as e:
+                print("Error fetching bill_member_score:", e)
+        # ---------------------------------------------------------
+
         bills = []
         for idx, row in enumerate(rows, start=1):
             # bill_id를 사용
@@ -887,29 +939,40 @@ def get_legislator_bills(member_id: int):
 
             member_name = row.get("member_name", "")
 
-            # 발언 관련 통계
-            n_speeches = row.get("n_speeches_bill") or row.get("n_speech_bill") or 0
+            # 발언 관련 통계 (member_bill_stats 테이블 실제 필드명 사용)
+            n_speeches = row.get("n_speeches") or 0
             total_len = row.get("total_speech_length_bill") or 0
+            avg_speech_len = row.get("avg_speech_length_bill") or 0
 
             # 태도 / 점수
             stance = row.get("stance") or "중립"
             raw_prob = row.get("score_prob_mean")
             
+            # bill_member_score에서 avg_score_prob adjusted_stance 조회 (bill_number 문자열 키 사용)
+            score_key = (member_id, bill_id_val)
+            score_data = bill_member_score_map.get(score_key, {})
+            
+            # avg_score_prob 사용 (없으면 raw_prob 유지)
+            final_score_prob = score_data.get("avg_score_prob") if score_data.get("avg_score_prob") is not None else raw_prob
+            
+            # adjusted_stance 사용 (없으면 stance 유지)
+            final_stance = score_data.get("adjusted_stance") if score_data.get("adjusted_stance") else stance
+            
             # 소수점 2자리로 제한
-            if raw_prob is not None:
-                raw_prob = round(raw_prob, 2)
+            # if raw_prob is not None:
+            #     raw_prob = round(raw_prob, 2)
 
-            if raw_prob is not None:
-                raw_prob = round(raw_prob, 3)
+            # if raw_prob is not None:
+            #     raw_prob = round(raw_prob, 3)
 
-            if raw_prob is not None:
-                try:
-                    p = float(raw_prob)          # -1 ~ 1 이라고 가정
-                    score = max(0, min(100, round((p + 1) / 2 * 100)))
-                except Exception:
-                    score = 50
-            else:
-                score = 50
+            # if raw_prob is not None:
+            #     try:
+            #         p = float(raw_prob)          # -1 ~ 1 이라고 가정
+            #         score = max(0, min(100, round((p + 1) / 2 * 100)))
+            #     except Exception:
+            #         score = 50
+            # else:
+            #     score = 50
 
             # 제안일자
             proposal_date = (
@@ -926,35 +989,40 @@ def get_legislator_bills(member_id: int):
             bills.append({
                 "id": idx,
                 "billNumber": bill_number,
-                "billName": bill_name_real, # [수정됨] 실제 법안 이름 할당
+                "billName": bill_name_real,
                 "proposer": member_name,
                 "role": "심사 참여",
                 "nSpeeches": n_speeches,
                 "totalSpeechLength": total_len,
-                "sentiment": stance,
-                "score": score,
-                "scoreProbMean": raw_prob,
+                "sentiment": final_stance,
+                "scoreProbMean": final_score_prob,
                 "date": proposal_date,
                 "meetingId": meeting_id,
             })
 
-        # 간단 요약
+        # AI 요약 생성 (member_bill_stats 테이블 데이터 기반)
         total_bills = len(bills)
         total_speeches = sum(b["nSpeeches"] for b in bills)
-        total_length = sum(b["totalSpeechLength"] for b in bills)
-
+        
         if total_bills > 0:
-            avg_speeches = round(total_speeches / total_bills, 1)
-            avg_length = round(total_length / total_bills, 1)
+            # 평균 협력도 계산 (score_prob_mean의 평균)
+            valid_scores = [b["scoreProbMean"] for b in bills if b["scoreProbMean"] is not None]
+            avg_cooperation = sum(valid_scores) / len(valid_scores) if valid_scores else 0
+            avg_cooperation = round(avg_cooperation, 4)
+            
+            # 법안 1건당 평균 발언 횟수
+            avg_speeches_per_bill = round(total_speeches / total_bills, 1)
+            
             ai_summary = (
-                f"해당 의원은 총 {total_bills}건의 법안 심사에 참여했습니다. "
-                f"법안 1건당 평균 발언 횟수는 {avg_speeches}회, "
-                f"평균 발언 분량은 {avg_length}문장 수준입니다."
+                f"총 {total_bills} 건의 심사에 참여, "
+                f"평균 협력도는 {avg_cooperation}, "
+                f"총 발언 횟수 {total_speeches}, "
+                f"법안 1건당 발언횟수 {avg_speeches_per_bill}"
             )
         else:
             ai_summary = "이 의원의 법안 심사 데이터가 없습니다."
 
-        return {"bills": bills, "ai_summary": ai_summary}
+        return {"ai_summary": ai_summary, "bills": bills}
 
     except Exception as e:
         print("Error get_legislator_bills:", repr(e))
@@ -1230,7 +1298,15 @@ def get_legislator_detail(member_id: int):
         # 1. 기본 정보 조회 (dimension 테이블)
         # ---------------------------------------------------------
         # committee_id 매핑을 위해 맵 가져오기
-        _, id_to_name_map = get_committee_maps()
+        name_to_id_map, id_to_name_map = get_committee_maps()
+
+        def _normalize_committee_name(comm_name: str):
+            """상임위 이름에서 소위원회 표기(하이픈 뒤) 제거하고 공백 정리."""
+            if not comm_name:
+                return comm_name
+            base = str(comm_name).split("-")[0].strip()
+            cleaned = re.sub(r"\s*(소위원회|소위).*$", "", base).strip()
+            return cleaned or base
 
         dim_res = (
             supabase.table("dimension")
@@ -1259,7 +1335,26 @@ def get_legislator_detail(member_id: int):
             .order("start_date", desc=True)
             .execute()
         )
-        committee_history = comm_hist_res.data or []
+        committee_history_raw = comm_hist_res.data or []
+
+        # committees 테이블의 메인 위원회 이름 집합 생성 (소위원회 접미어 제거)
+        valid_committees = {
+            _normalize_committee_name(name)
+            for name in name_to_id_map.keys()
+            if _normalize_committee_name(name)
+        }
+
+        # committees 테이블에 없는 위원회 제거 + 소위원회 접미어 제거
+        committee_history = []
+
+        for row in committee_history_raw:
+            raw_name = row.get("committee")
+            main_name = _normalize_committee_name(raw_name)
+            if not main_name:
+                continue
+            if main_name not in valid_committees:
+                continue
+            committee_history.append({**row, "committee": main_name})
 
         # 3. 정당 이력 조회 (parties_history 테이블)
         # ---------------------------------------------------------
@@ -1346,80 +1441,72 @@ def get_member_committee_history(member_id: int):
         print(f"Error fetching committee history for {member_id}:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # [추가] 특정 의원의 특정 법안에 대한 상세 발언 조회 API
 @app.get("/api/legislators/{member_id}/bills/{bill_id}/speeches")
 def get_member_bill_speeches_detail(member_id: int, bill_id: str):
     try:
         print(f"DEBUG /api/legislators/{member_id}/bills/{bill_id}/speeches")
 
-        # 1. 법안 이름 조회 (bills 테이블)
-        # ---------------------------------------------------------
+        # 1. 법안 이름 조회
         bill_name = "법안명 없음"
         try:
-            bill_res = (
-                supabase.table("bills")
-                .select("*")
-                .eq("bill_id", bill_id)
-                .execute()
-            )
+            bill_res = supabase.table("bills").select("bill_name").eq("bill_id", bill_id).execute()
             if bill_res.data:
-                bill_name = bill_res.data[0].get("bill_name")
+                bill_name = bill_res.data[0].get("bill_name", "법안명 없음")
         except Exception as e:
             print(f"Warning: Failed to fetch bill name for {bill_id}: {e}")
 
-        # 2. 해당 의원의 전체 발언 조회 (speeches 테이블)
-        # ---------------------------------------------------------
-        response = (
-            supabase.table("speeches")
-            .select("*")
-            .eq("member_id", member_id)
-            .execute()
-        )
-        rows = response.data or []
+        # 2. 해당 의원의 발언 조회 (Supabase 레벨에서 bill_id 필터링 시도)
+        import re
+        target_bid = str(bill_id).strip()
+        
+        # 먼저 .ilike()를 사용해서 Supabase 레벨에서 필터링 시도
+        try:
+            response = (
+                supabase.table("speeches")
+                .select("*")
+                .eq("member_id", member_id)
+                .ilike("bill_numbers", f"%{target_bid}%")  # bill_numbers 필드에서 bill_id 검색
+                .execute()
+            )
+            rows = response.data or []
+            print(f"DEBUG: Supabase .ilike() 필터링 결과: {len(rows)}개 발언")
+        except Exception as e:
+            print(f"DEBUG: Supabase .ilike() 필터링 실패, 전체 조회 후 Python 필터링: {e}")
+            # .ilike() 실패시 전체 조회
+            response = supabase.table("speeches").select("*").eq("member_id", member_id).execute()
+            rows = response.data or []
 
         if not rows:
             return {
                 "member_id": member_id,
+                "member_name": "",
                 "bill_id": bill_id,
                 "bill_name": bill_name,
-                "count": 0,
-                "speeches": [],
-                "message": "해당 의원의 발언 데이터가 없습니다."
+                "speeches_count": 0,
+                "aiSummary": None,
+                "speeches": []
             }
 
-        # 3. Python 레벨에서 bill_id 포함 여부 필터링 (더 견고한 파싱)
-        # ---------------------------------------------------------
-        import re
-        filtered_speeches = []
+        member_name = rows[0].get("member_name", "")
 
-        target_bid = str(bill_id).strip()
-        # allow numeric comparison if both sides are digits
+        # 3. Python 레벨에서 정확한 bill_id 매칭 재확인 (Supabase 필터가 부정확할 수 있음)
+        filtered_speeches = []
+        
         try:
             target_bid_int = int(target_bid)
         except Exception:
             target_bid_int = None
 
-        def _to_bill_list(val):
-            """Normalize various bill field formats into list of string ids."""
-            out = []
+        def _parse_bill_numbers(val):
+            """bill_numbers 필드를 파싱하여 리스트로 변환"""
             if val is None:
-                return out
-            # list -> stringify elements
+                return []
             if isinstance(val, list):
-                for b in val:
-                    if b is None:
-                        continue
-                    out.append(str(b).strip())
-                return out
-
-            # dict or other -> stringify
-            if isinstance(val, dict):
-                return [str(val)]
-
-            # string -> try literal_eval for list-like strings
+                return [str(b).strip() for b in val if b is not None]
             if isinstance(val, str):
                 s = val.strip()
-                # common case: stringified python list
                 if s.startswith("[") and s.endswith("]"):
                     try:
                         parsed = ast.literal_eval(s)
@@ -1427,26 +1514,20 @@ def get_member_bill_speeches_detail(member_id: int, bill_id: str):
                             return [str(x).strip() for x in parsed if x is not None]
                     except Exception:
                         pass
-                # extract numeric tokens (e.g., '2107809', or '2107809,2107394')
                 nums = re.findall(r"\d+", s)
                 if nums:
-                    return [n.strip() for n in nums]
-                # fallback: comma-split
+                    return nums
                 if "," in s:
-                    parts = [p.strip() for p in s.split(",") if p.strip()]
-                    return parts
-                # final fallback: return the raw string
+                    return [p.strip() for p in s.split(",") if p.strip()]
                 return [s]
-
-            # anything else
             return [str(val)]
 
         for row in rows:
             bill_col_val = row.get("bill_numbers") or row.get("bill_review") or row.get("bills")
-            bills_list = _to_bill_list(bill_col_val)
+            bills_list = _parse_bill_numbers(bill_col_val)
 
+            # bill_id 매칭 확인
             matched = False
-            # numeric compare when possible
             if target_bid_int is not None:
                 for b in bills_list:
                     try:
@@ -1455,9 +1536,8 @@ def get_member_bill_speeches_detail(member_id: int, bill_id: str):
                             break
                     except Exception:
                         continue
-
+            
             if not matched:
-                # string comparison (normalized)
                 normalized = [str(x).strip() for x in bills_list]
                 if target_bid in normalized:
                     matched = True
@@ -1465,24 +1545,36 @@ def get_member_bill_speeches_detail(member_id: int, bill_id: str):
             if matched:
                 filtered_speeches.append({
                     "speech_id": row.get("speech_id"),
-                    "date": row.get("speech_date") or row.get("date"),
-                    "meeting_id": row.get("meeting_id"),
+                    "member_id": row.get("member_id"),
                     "member_name": row.get("member_name"),
                     "speech_length": row.get("speech_length"),
-                    "speech_text": row.get("speech_text"),
-                    "bills": bills_list,
-                    "sentiment": row.get("sentiment_label"),
-                    "score": row.get("score_prob"),
+                    "prob_noncoop": row.get("prob_noncoop"),
                     "prob_coop": row.get("prob_coop"),
-                    "prob_noncoop": row.get("prob_noncoop")
+                    "prob_neutral": row.get("prob_neutral"),
+                    "sentiment_label": row.get("sentiment_label"),
+                    "score_prob": row.get("score_prob"),
+                    "speech_text": row.get("speech_text"),
+                    "bill_numbers": str(bills_list)
                 })
 
-        # 4. 결과 반환
+        # aiSummary 생성
+        speeches_count = len(filtered_speeches)
+        ai_summary = None
+        
+        if speeches_count > 0:
+            # 평균 협력도 계산
+            score_probs = [s.get("score_prob", 0) for s in filtered_speeches if s.get("score_prob") is not None]
+            avg_cooperation = sum(score_probs) / len(score_probs) if score_probs else 0
+            
+            ai_summary = f"해당 의원은 이 법률안에 대해 {speeches_count} 회 발언을 했으며 평균 협력도는 {avg_cooperation:.4f} 입니다."
+        
         return {
             "member_id": member_id,
+            "member_name": member_name,
             "bill_id": bill_id,
             "bill_name": bill_name,
-            "count": len(filtered_speeches),
+            "speeches_count": speeches_count,
+            "aiSummary": ai_summary,
             "speeches": filtered_speeches
         }
 
@@ -1492,19 +1584,40 @@ def get_member_bill_speeches_detail(member_id: int, bill_id: str):
 
 
 # ==========================================
-# 2. AUTHENTICATION & AI (GIỮ NGUYÊN)
+# 2. AUTHENTICATION & AUTO LOGGING
 # ==========================================
 
 @app.post("/register", response_model=schemas.UserOut)
 def register_user(user: schemas.UserCreate):
     try:
+        # 1. Đăng ký bên Supabase Auth (Code cũ)
         response = supabase.auth.sign_up({
             "email": user.email,
             "password": user.password,
             "options": {"data": {"username": user.username, "full_name": user.full_name}}
         })
+        
         if not response.user:
-             raise HTTPException(status_code=400, detail="실패")
+             raise HTTPException(status_code=400, detail="Đăng ký thất bại")
+
+        # ============================================================
+        # 🔥 THÊM MỚI: TỰ ĐỘNG GHI LOG KHI TẠO TÀI KHOẢN
+        # ============================================================
+        try:
+            new_user_id = response.user.id
+            welcome_log = {
+                "user_id": new_user_id,
+                "activity_type": "system",       
+                "target_name": "Tạo tài khoản",
+                "details": f"Chào mừng {user.full_name or user.username} gia nhập hệ thống!"
+            }
+            # Ghi vào bảng user_logs
+            supabase.table("user_logs").insert(welcome_log).execute()
+            print("✅ Đã ghi log đăng ký.")
+        except Exception as log_error:
+            print(f"⚠️ Lỗi ghi log đăng ký: {log_error}")
+        # ============================================================
+
         return {
              "email": response.user.email,
              "username": response.user.user_metadata.get("username"),
@@ -1516,12 +1629,35 @@ def register_user(user: schemas.UserCreate):
 @app.post("/token")
 def login_for_access_token(user_data: schemas.UserLogin):
     try:
+        # 1. Đăng nhập (Code cũ)
         response = supabase.auth.sign_in_with_password({
             "email": user_data.email, "password": user_data.password
         })
+        
+        # ============================================================
+        # 🔥 THÊM MỚI: TỰ ĐỘNG GHI LOG KHI ĐĂNG NHẬP
+        # ============================================================
+        try:
+            if response.user:
+                login_log = {
+                    "user_id": response.user.id,
+                    "activity_type": "system",
+                    "target_name": "Đăng nhập",
+                    "details": "Đăng nhập hệ thống thành công"
+                }
+                supabase.table("user_logs").insert(login_log).execute()
+                print(f"✅ Đã ghi log đăng nhập: {user_data.email}")
+        except Exception as log_error:
+            print(f"⚠️ Lỗi ghi log đăng nhập: {log_error}")
+        # ============================================================
+
         return {
-            "access_token": response.session.access_token, "token_type": "bearer",
-            "user": {"email": response.user.email, "username": response.user.user_metadata.get("username")}
+            "access_token": response.session.access_token, 
+            "token_type": "bearer",
+            "user": {
+                "email": response.user.email, 
+                "username": response.user.user_metadata.get("username")
+            }
         }
     except Exception:
         raise HTTPException(status_code=401, detail="Email hoặc mật khẩu sai.")
@@ -1539,8 +1675,8 @@ def predict_legislation(data_in: schemas.AnalysisInput, current_user = Depends(g
 @app.get("/api/dashboard-stats")
 def get_dashboard_stats():
     return {
-        "sentiment": {"cooperative": 65, "non_cooperative": 35, "neutral": 0},
-        "prediction": {"bill_name": "AI 기본법 (안)", "probability": 87, "status": "예측 완료"}
+        "sentiment": {"cooperative": 12, "non_cooperative": 15, "neutral": 73},
+        "prediction": {"bill_name": "인공지능법", "probability": 17.15, "status": "분석 완료"}
     }
 
 @app.get("/")
@@ -1548,126 +1684,378 @@ def read_root():
     return {"message": "K-LegiSight API is running!"}
 
 
+# ==========================================
+# 통합 검색 API (의원 → 법안 순서)
+# ==========================================
+@app.get("/api/unified-search")
+def unified_search(query: str = Query(..., description="검색어 (의원명 또는 법안명)")):
+    """
+    통합 검색 API
+    
+    검색 순서:
+      1. 의원 이름으로 검색 (dimension 테이블)
+      2. 결과가 없으면 법안명으로 검색 (bills 테이블)
+    
+    반환:
+      - type: "legislator" | "bill" | "none"
+      - data: 검색된 데이터 (의원 정보 또는 법안 정보)
+    """
+    try:
+        query_str = query.strip()
+        
+        if not query_str:
+            return {"type": "none", "data": None, "message": "검색어를 입력해주세요."}
+        
+        # 1. 의원 이름으로 검색 (부분 일치)
+        legislator_res = (
+            supabase.table("dimension")
+            .select("*")
+            .ilike("name", f"%{query_str}%")
+            .limit(1)
+            .execute()
+        )
+        
+        if legislator_res.data and len(legislator_res.data) > 0:
+            member_data = legislator_res.data[0]
+            member_id = member_data.get("member_id") or member_data.get("id")
+            
+            # 위원회 이름 매핑
+            _, id_to_name_map = get_committee_maps()
+            committee_id = member_data.get("committee_id")
+            committee_name = id_to_name_map.get(committee_id, "소속 위원회 없음")
+            
+            return {
+                "type": "legislator",
+                "data": {
+                    "member_id": member_id,
+                    "name": member_data.get("name"),
+                    "party": member_data.get("party"),
+                    "committee": committee_name,
+                    "region": member_data.get("district") or member_data.get("region"),
+                    "gender": member_data.get("gender"),
+                    "count": member_data.get("elected_time"),
+                    "method": member_data.get("elected_type"),
+                    "img": member_data.get("img") or member_data.get("image_url") or ""
+                },
+                "message": f"의원 '{member_data.get('name')}'을(를) 찾았습니다."
+            }
+        
+        # 2. 법안명으로 검색 (부분 일치)
+        bill_res = (
+            supabase.table("bills")
+            .select("*")
+            .ilike("bill_name", f"%{query_str}%")
+            .limit(10)
+            .execute()
+        )
+        
+        if bill_res.data and len(bill_res.data) > 0:
+            bills = []
+            for b in bill_res.data:
+                bills.append({
+                    "bill_id": b.get("bill_id"),
+                    "bill_number": b.get("bill_number"),
+                    "bill_name": b.get("bill_name"),
+                    "proposer": b.get("proposer"),
+                    "propose_date": b.get("propose_date"),
+                    "committee": b.get("committee")
+                })
+            
+            return {
+                "type": "bill",
+                "data": bills,
+                "message": f"법안 {len(bills)}건을 찾았습니다."
+            }
+        
+        # 3. 검색 결과 없음
+        return {
+            "type": "none",
+            "data": None,
+            "message": f"'{query_str}'에 대한 검색 결과가 없습니다."
+        }
+    
+    except Exception as e:
+        print(f"Error in unified_search: {e}")
+        raise HTTPException(status_code=500, detail=f"통합 검색 중 오류 발생: {str(e)}")
 
 
 @app.post("/api/bills/analysis", response_model=schemas.BillAnalysisResponse)
 def analyze_bill_centric(req: schemas.BillSearchInput):
+    """
+    법안 검색 및 분석 API (4개 조건 지원)
+    
+    검색 조건:
+      - bill_name: 법안명 (부분 일치)
+      - bill_number: 의안번호 (정확 일치)
+      - proposer: 대표발의자 (부분 일치)
+      - proposer_type: 제안 유형 (의원/정부 등)
+    
+    반환:
+      - total_count: 검색된 법안 수
+      - search_conditions: 사용된 검색 조건
+      - results: 각 법안별 분석 결과 (기본 정보 + 통계)
+    """
     try:
-        print(f"Searching Bill: {req.bill_name} | No: {req.bill_number}")
+        # --- 1단계: 검색 조건 구성 및 로깅 ---
+        search_conditions = {}
+        
+        if req.bill_name:
+            search_conditions["bill_name"] = req.bill_name
+        if req.bill_number:
+            search_conditions["bill_number"] = req.bill_number
+        if req.proposer:
+            search_conditions["proposer"] = req.proposer
+        if req.proposer_type:
+            search_conditions["proposer_type"] = req.proposer_type
+        
+        print(f"[법안 검색] 조건: {search_conditions}")
 
-        # --- BƯỚC 1: Tìm thông tin cơ bản của Bill (Metadata) ---
+        # --- 2단계: bills 테이블에서 법안 검색 ---
         query = supabase.table("bills").select("*")
 
+        # 4개 조건 적용
         if req.bill_number:
-            query = query.eq("bill_no", req.bill_number) # Giả sử cột là bill_no hoặc bill_id
-        elif req.bill_name:
+            query = query.eq("bill_id", req.bill_number)
+        if req.bill_name:
             query = query.ilike("bill_name", f"%{req.bill_name}%")
-        
         if req.proposer:
-            query = query.ilike("proposer", f"%{req.proposer}%")
-        
-        # Nếu có cột submission_type trong DB
-        # if req.submission_type:
-        #     query = query.eq("proposer_type", req.submission_type)
+            query = query.ilike("proposer_name", f"%{req.proposer}%")
+        if req.proposer_type:
+            query = query.eq("proposer_type", req.proposer_type)
 
-        bills_res = query.limit(1).execute() # Lấy bill phù hợp nhất
-        bill_data = bills_res.data[0] if bills_res.data else None
+        bills_res = query.execute()
+        bills_data = bills_res.data or []
 
-        if not bill_data:
+        if not bills_data:
             return {
-                "bill_info": {},
-                "stats": {"total_speeches": 0, "total_cooperation": 0, "party_breakdown": []},
-                "message": "Không tìm thấy pháp án phù hợp."
+                "total_count": 0,
+                "search_conditions": search_conditions,
+                "results": [],
+                "message": "검색 조건에 맞는 법안을 찾을 수 없습니다."
             }
 
-        target_bill_name = bill_data.get("bill_name")
-        print(f"Found Bill: {target_bill_name}")
+        print(f"[법안 검색] 총 {len(bills_data)}건 발견")
 
-        # --- BƯỚC 2: Tính toán thống kê từ member_bill_stats ---
-        # Tìm tất cả bản ghi thống kê liên quan đến tên Bill này
-        # (Lưu ý: bill_review trong member_bill_stats là tên bill)
-        stats_query = (
-            supabase.table("member_bill_stats")
-            .select("*")
-            .ilike("bill_review", f"%{target_bill_name}%") 
-            .execute()
-        )
-        stats_rows = stats_query.data or []
+        # --- 2-1단계: bill_detail_score에서 평가 데이터 조회 및 정렬 ---
+        bill_ids = [bill.get("bill_id") for bill in bills_data if bill.get("bill_id")]
+        
+        # bill_detail_score 테이블에서 평가 정보 조회
+        bill_score_map = {}
+        if bill_ids:
+            try:
+                score_res = (
+                    supabase.table("bill_detail_score")
+                    .select("bill_number, total_speeches, avg_score_prob, bayesian_score")
+                    .in_("bill_number", bill_ids)
+                    .execute()
+                )
+                for score_row in (score_res.data or []):
+                    bid = score_row.get("bill_number")
+                    bill_score_map[str(bid)] = {
+                        "total_speeches": score_row.get("total_speeches", 0),
+                        "avg_score_prob": score_row.get("avg_score_prob", 0),
+                        "bayesian_score": score_row.get("bayesian_score", 0)
+                    }
+                print(f"[법안 평가 조회] {len(bill_score_map)}개 법안에 평가 데이터 존재")
+            except Exception as e:
+                print(f"WARN: bill_detail_score 조회 실패: {e}")
+        
+        # 평가 데이터 기준으로 정렬: 평가 있는 법안 우선, 그 중에서도 발언 수 많은 순
+        def bill_sort_key(bill):
+            bid = str(bill.get("bill_id"))
+            score_info = bill_score_map.get(bid, {})
+            has_score = 1 if bid in bill_score_map else 0
+            speeches = score_info.get("total_speeches", 0)
+            return (-has_score, -speeches)  # 평가 있는 것 먼저, 발언 많은 것 먼저
+        
+        bills_data.sort(key=bill_sort_key)
+        print(f"[법안 정렬] 평가된 법안 우선 정렬 완료")
 
-        if not stats_rows:
-             return {
-                "bill_info": bill_data,
-                "stats": {"total_speeches": 0, "total_cooperation": 0, "party_breakdown": []},
-                "message": "Pháp án này chưa có dữ liệu phân tích phát biểu."
+        # --- 3단계: 검색된 모든 법안의 통계를 한번에 조회 (최적화) ---
+        
+        if not bill_ids:
+            return {
+                "total_count": 0,
+                "search_conditions": search_conditions,
+                "results": [],
+                "message": "유효한 법안 ID를 찾을 수 없습니다."
             }
-
-        # --- BƯỚC 3: Aggregation (Tính toán) ---
         
-        total_speeches = 0
-        total_score_sum = 0
-        count_for_score = 0
+        print(f"[통계 조회] {len(bill_ids)}개 법안의 데이터를 조회합니다.")
         
-        # Để tính theo đảng, ta cần map member_id -> party
-        # Lấy danh sách member_id từ kết quả stats để query bảng dimension
-        member_ids = [r['member_id'] for r in stats_rows]
-        
-        # Lấy thông tin đảng của các member này
-        dim_res = supabase.table("dimension").select("member_id, party").in_("member_id", member_ids).execute()
-        member_party_map = {d['member_id']: d['party'] for d in dim_res.data} # {101: 'TheMinjoo', ...}
-
-        party_agg = {} # { 'TheMinjoo': [score1, score2], 'PPP': [score...] }
-
-        for row in stats_rows:
-            # 1. Tổng phát biểu
-            n_speech = row.get("n_speeches_bill") or 0
-            total_speeches += n_speech
-
-            # 2. Xử lý điểm số
-            raw_prob = row.get("score_prob_mean")
-            if raw_prob is not None:
-                # Convert -1~1 to 0~100
-                score = max(0, min(100, round((float(raw_prob) + 1) / 2 * 100)))
+        # --- 3-1단계: bill_party_score 테이블에서 정당별 점수 조회 (최적화) ---
+        party_scores_by_bill: dict[str, list[dict]] = {}
+        if bill_ids:
+            try:
+                print(f"[정당별 점수 조회] {len(bill_ids)}개 법안의 정당별 점수를 조회합니다.")
+                print(f"  샘플 bill_ids (처음 3개): {bill_ids[:3]}")
+                party_score_res = (
+                    supabase.table("bill_party_score")
+                    .select("bill_number, party_name, speech_count, avg_score_prob, bayesian_score, original_stance")
+                    .in_("bill_number", bill_ids)
+                    .execute()
+                )
                 
-                total_score_sum += score
-                count_for_score += 1
-
-                # 3. Gom nhóm theo đảng
-                m_id = row.get("member_id")
-                party = member_party_map.get(m_id, "Unknown")
+                print(f"  조회된 전체 행 수: {len(party_score_res.data or [])}")
+                if party_score_res.data:
+                    print(f"  첫 번째 행 샘플: {party_score_res.data[0]}")
                 
-                if party not in party_agg:
-                    party_agg[party] = []
-                party_agg[party].append(score)
+                for ps_row in (party_score_res.data or []):
+                    bid = str(ps_row.get("bill_number"))
+                    if bid not in party_scores_by_bill:
+                        party_scores_by_bill[bid] = []
+                    party_scores_by_bill[bid].append(ps_row)
+                
+                print(f"[정당별 점수 조회] {len(party_scores_by_bill)}개 법안에 정당 데이터 존재")
+            except Exception as e:
+                print(f"WARN: bill_party_score 조회 실패: {e}")
 
-        # Tính trung bình tổng
-        avg_total_coop = round(total_score_sum / count_for_score, 1) if count_for_score > 0 else 50
-
-        # Tính trung bình theo đảng
-        party_breakdown = []
-        for p_name, scores in party_agg.items():
-            if p_name == "Unknown": continue
-            avg = round(sum(scores) / len(scores), 1)
-            party_breakdown.append({
-                "party_name": p_name,
-                "avg_score": avg,
-                "member_count": len(scores)
+        # --- 3-2단계: bill_member_score 테이블에서 개인별 점수/발언 수 조회 ---
+        member_scores_by_bill: dict[str, list[dict]] = {}
+        if bill_ids:
+            try:
+                print(f"[개인별 점수 조회] {len(bill_ids)}개 법안의 개인별 점수를 조회합니다.")
+                member_score_res = (
+                    supabase.table("bill_member_score")
+                    .select("bill_number, member_id, member_name, party_name, speech_count, bayesian_score, avg_score_prob")
+                    .in_("bill_number", bill_ids)
+                    .execute()
+                )
+                
+                print(f"  조회된 전체 행 수: {len(member_score_res.data or [])}")
+                if member_score_res.data:
+                    print(f"  첫 번째 행 샘플: {member_score_res.data[0]}")
+                
+                for ms_row in (member_score_res.data or []):
+                    bid = str(ms_row.get("bill_number"))
+                    if bid not in member_scores_by_bill:
+                        member_scores_by_bill[bid] = []
+                    member_scores_by_bill[bid].append(ms_row)
+                print(f"[개인별 점수 조회] {len(member_scores_by_bill)}개 법안에 개인 데이터 존재")
+            except Exception as e:
+                print(f"WARN: bill_member_score 조회 실패: {e}")
+        
+        # --- 4단계: 각 법안별 통계 계산 ---
+        analysis_results = []
+        analyzed_count = 0  # 실제 분석된 법안 수 카운트
+        
+        for bill in bills_data:
+            bill_id = bill.get("bill_id")
+            bill_name = bill.get("bill_name")
+            
+            print(f"[법안 분석] {bill_name} (ID: {bill_id})")
+            
+            # bill_party_score에서 정당별 점수 가져오기 (우선 사용)
+            party_score_rows = party_scores_by_bill.get(str(bill_id), [])
+            
+            # bill_member_score에서 개인별 점수 가져오기
+            member_score_rows = member_scores_by_bill.get(str(bill_id), [])
+            
+            # 데이터가 전혀 없으면 기본 정보만 포함
+            if not party_score_rows and not member_score_rows:
+                print(f"  - 데이터 없음, 기본 정보만 포함")
+                analysis_results.append({
+                    "bill_info": bill,
+                    "stats": {
+                        "total_speeches": 0,
+                        "total_cooperation": 0.0,
+                        "party_breakdown": [],
+                        "individual_members": []
+                    }
+                })
+                continue
+            
+            # --- 통계 계산 ---
+            total_speeches = 0
+            total_score_sum = 0.0
+            count_for_score = 0
+            party_breakdown = []
+            individual_members = []
+            
+            # [1단계] bill_party_score 사용 - 정당별 협력도
+            if party_score_rows:
+                print(f"  - bill_party_score 사용: {len(party_score_rows)}개 정당")
+                
+                for ps_row in party_score_rows:
+                    party_name = ps_row.get("party_name")
+                    speech_count = ps_row.get("speech_count", 0)
+                    bayesian = ps_row.get("bayesian_score")
+                    
+                    total_speeches += speech_count
+                    
+                    if bayesian is not None:
+                        try:
+                            score = float(bayesian)
+                            total_score_sum += score * speech_count
+                            count_for_score += speech_count
+                            
+                            party_breakdown.append({
+                                "party_name": party_name,
+                                "avg_score": score,
+                                "member_count": speech_count,
+                                "speech_count": speech_count,
+                                "stance": ps_row.get("original_stance", "중립")
+                            })
+                        except (ValueError, TypeError) as e:
+                            print(f"  WARN: bayesian_score 변환 실패: {bayesian}, {e}")
+                
+                party_breakdown.sort(key=lambda x: x['avg_score'], reverse=True)
+                print(f"    정당별 분석 완료: {len(party_breakdown)}개 정당")
+            
+            # [2단계] bill_member_score 사용 - 개인별 협력도
+            if member_score_rows:
+                print(f"  - bill_member_score 사용: {len(member_score_rows)}명")
+                
+                for r in member_score_rows:
+                    n_speeches = r.get("speech_count", 0)
+                    score = r.get("bayesian_score")
+                    
+                    if score is None:
+                        score = r.get("avg_score_prob")
+                    
+                    individual_members.append({
+                        "member_id": r.get("member_id"),
+                        "member_name": r.get("member_name"),
+                        "party_name": r.get("party_name"),
+                        "n_speeches": n_speeches,
+                        "score": score
+                    })
+                
+                # 협력도 높은 순으로 정렬
+                individual_members.sort(key=lambda x: x['score'] if x['score'] is not None else 0, reverse=True)
+                print(f"    개인별 분석 완료: {len(individual_members)}명")
+            
+            # 평균 협력도 계산
+            avg_cooperation = total_score_sum / count_for_score if count_for_score > 0 else 0.0
+            
+            print(f"  - 최종 통계: speeches={total_speeches}, cooperation={avg_cooperation:.4f}, parties={len(party_breakdown)}, members={len(individual_members)}")
+            
+            # 분석 완료 여부 판단
+            if total_speeches > 0 or party_breakdown or individual_members:
+                analyzed_count += 1
+            
+            # 결과 추가
+            analysis_results.append({
+                "bill_info": bill,
+                "stats": {
+                    "total_speeches": total_speeches,
+                    "total_cooperation": avg_cooperation,
+                    "party_breakdown": party_breakdown,
+                    "individual_members": individual_members
+                }
             })
-
-        # Sắp xếp đảng nào hợp tác nhất lên đầu
-        party_breakdown.sort(key=lambda x: x['avg_score'], reverse=True)
-
+        
+        # --- 5단계: 결과 정리 및 반환 ---
         return {
-            "bill_info": bill_data,
-            "stats": {
-                "total_speeches": total_speeches,
-                "total_cooperation": avg_total_coop,
-                "party_breakdown": party_breakdown
-            },
-            "message": "Phân tích hoàn tất."
+            "total_count": len(analysis_results),
+            "analyzed_count": analyzed_count,  # 실제 분석된 법안 수
+            "search_conditions": search_conditions,
+            "results": analysis_results,
+            "message": f"총 {len(analysis_results)}건 검색, {analyzed_count}건 분석 완료"
         }
 
     except Exception as e:
-        print("Error Bill Analysis:", e)
+        print("Error in Bill Analysis:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 # [추가] public 스키마의 각 테이블에서 5개 행씩 미리보기 제공
@@ -1761,6 +2149,34 @@ def get_committee_summary(committee_id: int):
             .execute()
         )
         members_top5 = member_res.data or []
+        
+        # members_top5에 party_id, party_name 추가
+        if members_top5:
+            member_ids = [m.get("member_id") for m in members_top5 if m.get("member_id")]
+            if member_ids:
+                try:
+                    dim_res = (
+                        supabase.table("dimension")
+                        .select("member_id, party_id, party")
+                        .in_("member_id", member_ids)
+                        .execute()
+                    )
+                    # member_id -> {party_id, party_name} 매핑
+                    party_map = {
+                        d.get("member_id"): {
+                            "party_id": d.get("party_id"),
+                            "party_name": d.get("party")
+                        }
+                        for d in (dim_res.data or [])
+                    }
+                    # members_top5에 party 정보 추가
+                    for member in members_top5:
+                        mid = member.get("member_id")
+                        if mid and mid in party_map:
+                            member["party_id"] = party_map[mid]["party_id"]
+                            member["party_name"] = party_map[mid]["party_name"]
+                except Exception as e:
+                    print(f"WARN: dimension 조회 실패 (party 정보): {e}")
 
         # 3. committee_bill_ranking: rank_in_committee 기준 상위 5개 법안
         bill_res = (
@@ -1770,10 +2186,21 @@ def get_committee_summary(committee_id: int):
             )
             .eq("committee", committee_name)
             .order("rank_in_committee")
-            .limit(5)
+            .limit(10)  # 중복 제거를 위해 더 많이 조회
             .execute()
         )
-        bills_top5 = bill_res.data or []
+        bills_raw = bill_res.data or []
+        
+        # bill_name 중복 제거 (첫 번째 법안만 유지)
+        seen_names = set()
+        bills_top5 = []
+        for bill in bills_raw:
+            bill_name = bill.get("bill_name")
+            if bill_name and bill_name not in seen_names:
+                seen_names.add(bill_name)
+                bills_top5.append(bill)
+                if len(bills_top5) >= 5:
+                    break
 
         return {
             "committee": committee_name,
@@ -1846,3 +2273,132 @@ def predict_bill_pass(data: BillKeywordInput):
         print(f"Error in /api/predict/bill-pass: {e}")
         raise HTTPException(status_code=500, detail=f"법안 예측 중 오류: {str(e)}")
 
+# API Dashboard
+# Thay thế hàm get_user_dashboard cũ trong main.py bằng đoạn này:
+
+@app.get("/api/dashboard/me", response_model=schemas.DashboardData)
+def get_user_dashboard(current_user = Depends(get_current_user)):
+    """
+    Lấy dữ liệu tổng hợp cho trang Dashboard (Phiên bản Fix lỗi 500)
+    """
+    user_id = current_user.id
+    
+    try:
+        # 1. Lấy thống kê (Dùng count='exact', head=True để chỉ lấy số lượng, không lấy data cho nhẹ)
+        logs_count_res = supabase.table("user_logs").select("*", count="exact", head=True).eq("user_id", user_id).execute()
+        total_activities = logs_count_res.count if logs_count_res.count is not None else 0
+        
+        saved_count_res = supabase.table("user_bookmarks").select("*", count="exact", head=True).eq("user_id", user_id).execute()
+        total_saved = saved_count_res.count if saved_count_res.count is not None else 0
+
+        # 2. Lấy 5 hoạt động gần nhất
+        logs_res = (
+            supabase.table("user_logs")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(5)
+            .execute()
+        )
+        # Fix lỗi: Nếu data là None thì gán list rỗng
+        recent_logs = logs_res.data if logs_res.data else []
+
+        # 3. Lấy bookmark
+        bookmarks_res = (
+            supabase.table("user_bookmarks")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        # Fix lỗi: Nếu data là None thì gán list rỗng
+        saved_items = bookmarks_res.data if bookmarks_res.data else []
+
+        # 4. Trả về (Đảm bảo đúng format Pydantic)
+        return {
+            "user_info": {
+                "email": current_user.email,
+                "name": current_user.user_metadata.get("full_name", "User") or "User", # Fix lỗi nếu full_name null
+                "plan": "Free Plan"
+            },
+            "stats": {
+                "total_activities": total_activities,
+                "total_saved": total_saved,
+                "trend": "Active"
+            },
+            "recent_activities": recent_logs,
+            "saved_bills": saved_items
+        }
+
+    except Exception as e:
+        # In lỗi chi tiết ra terminal để debug nếu vẫn bị
+        print(f"🔥 Dashboard Error Details: {str(e)}")
+        # Trả về dữ liệu rỗng thay vì lỗi 500 để App không bị sập
+        return {
+            "user_info": {"email": current_user.email, "name": "User", "plan": "Error"},
+            "stats": {"total_activities": 0, "total_saved": 0, "trend": "Error"},
+            "recent_activities": [],
+            "saved_bills": []
+        }
+
+
+# ==========================================
+# 5. USER ACTION LOGGING (Thêm vào cuối main.py)
+# ==========================================
+
+@app.post("/api/log/activity")
+def log_user_activity(log: schemas.UserLogInput, current_user = Depends(get_current_user)):
+    try:
+        data = {
+            "user_id": current_user.id,
+            "activity_type": log.activity_type,
+            "target_name": log.target_name,
+            "details": log.details
+        }
+        supabase.table("user_logs").insert(data).execute()
+        return {"status": "success"}
+    except Exception as e:
+        print("Log Error:", e)
+        return {"status": "error"}
+
+
+@app.post("/api/bookmark")
+def toggle_bookmark(item: schemas.BookmarkInput, current_user = Depends(get_current_user)):
+    """
+    Thêm/Xóa bookmark (Nếu có rồi thì xóa, chưa có thì thêm)
+    """
+    user_id = current_user.id
+    try:
+        # Kiểm tra xem đã bookmark chưa
+        existing = (
+            supabase.table("user_bookmarks")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("item_type", item.item_type)
+            .eq("item_id", item.item_id)
+            .execute()
+        )
+        
+        if existing.data:
+            # Nếu có rồi -> Xóa (Un-bookmark)
+            supabase.table("user_bookmarks").delete().eq("id", existing.data[0]['id']).execute()
+            return {"status": "removed", "msg": "Bookmark removed"}
+        else:
+            # Chưa có -> Thêm mới
+            data = {
+                "user_id": user_id,
+                "item_type": item.item_type,
+                "item_id": item.item_id,
+                "title": item.title,
+                "score": item.score,
+                "status": "Tracking"
+            }
+            supabase.table("user_bookmarks").insert(data).execute()
+            return {"status": "added", "msg": "Bookmark added"}
+            
+    except Exception as e:
+        print("Bookmark Error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+    

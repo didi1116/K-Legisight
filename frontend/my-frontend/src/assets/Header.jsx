@@ -39,10 +39,12 @@ export function Header() {
         
         {/* Logo */}
         <Link to="/home" className="flex items-center gap-2 text-lg font-bold tracking-tight hover:opacity-90 transition-opacity">
-          <div className="p-1 bg-blue-600 rounded-md">
-            <Activity className="h-4 w-4 text-white" />
-          </div>
-          <span>K-LegiSight</span>
+          <div className="text-2xl font-bold tracking-tighter flex items-center gap-0.5">
+            <img src="/logo.png" className="w-16 h-20 mr-2 object-contain"/>
+                <span>
+                   K-LegiSight
+                </span>
+            </div>
         </Link>
 
         {/* Menu & User Action */}
@@ -50,8 +52,8 @@ export function Header() {
           
           {/* Menu Links (Ẩn trên mobile) */}
           <nav className="hidden md:flex gap-6 text-sm font-medium text-slate-300">
-             <Link to="/sentimentpage" className="hover:text-white transition-colors">감성 분석</Link>
-             <Link to="/billprediction" className="hover:text-white transition-colors">법안 예측</Link>
+             <Link to="/sentimentpage" className="hover:text-white transition-colors">협력도 분석</Link>
+             <Link to="/billprediction" className="hover:text-white transition-colors">입법 결과 예측 분석 보조</Link>
           </nav>
 
           {/* User Info */}
@@ -63,7 +65,9 @@ export function Header() {
                   <div className="text-sm font-medium text-white">{user.email.split('@')[0]} 님</div>
                 </div>
                 <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold border border-slate-700 shadow-lg">
+                  <Link to = "/dashboard">
                   <User className="h-4 w-4" />
+                  </Link>
                 </div>
                 <Button 
                   variant="ghost" 
